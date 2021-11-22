@@ -9,24 +9,21 @@ pub fn main() anyerror!void {
     var cpu = Cpu{ .game_pak = input_file[0..input_file.len] };
     std.log.info("{}", .{input_file.len});
 
-    // var cpu = Cpu{};
-    // std.mem.copy(u8, &cpu.rom, input_file);
-
     // jump to game pak rom
     cpu.reg[15] = 0x800_0000;
 
     var prog_counter: usize = 0;
     while (true) : (prog_counter += 1) {
         var instr: u32 = cpu.getNextInstruction();
-        // cpu.dumpRegisters();
-        std.debug.print("[{X: >4}] {X:0>8}: {X:0>8} {} ({})\n", .{
+        cpu.dumpRegisters();
+        std.debug.print("[{: >4}] {X:0>8}: {X:0>8} {} ({})\n", .{
             prog_counter,
             cpu.reg[15],
             instr,
             Cpu.checkCondition(instr),
             Cpu.decode(instr),
         });
-        std.debug.print("           {b:0>32}\n", .{instr});
+        std.debug.print("  {b:0>32}\n", .{instr});
 
         switch (Cpu.decode(instr)) {
             .Branch => cpu.branch(instr),

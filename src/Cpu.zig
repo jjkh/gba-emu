@@ -281,24 +281,6 @@ pub fn blockDataTransfer(self: *Cpu, instr: u32) void {
 
     std.log.debug("{}", .{@bitCast(BdtInstr, instr)});
 
-    // const pre_index = (instr & 0x0100_0000) == 0x0100_0000;
-    // const up = enum { Up, Down }{if ((instr & 0x0080_0000) == 0x0080_0000) .Up else .Down};
-    // const load_psr_or_force_user_mode = (instr & 0x0040_0000) == 0x0040_0000;
-    // const write_address_into_base = (instr & 0x0020_0000) == 0x0020_0000;
-    // const load = (instr & 0x0010_0000) == 0x0010_0000;
-    // const base_register = (instr & 0x000F_0000) >> 16;
-    // const register_list = instr & 0xFFFF;
-
-    // std.log.debug("P={} U={} S={} W={} L={} Rn={} RegList=0x{X}", .{
-    //     pre_index,
-    //     up,
-    //     load_psr_or_force_user_mode,
-    //     write_address_into_base,
-    //     load,
-    //     base_register,
-    //     register_list,
-    // });
-
     self.reg[PC] += 4;
 }
 
@@ -344,52 +326,115 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
 
     const opcode = @intToEnum(Opcode, (instr & 0x01E0_0000) >> 21);
 
+    var operand1: u32 = self.reg[reg1];
+    var operand2: u32 = undefined;
     if (immediate) {
-        const imm_val = instr & 0xFF;
+        const imm_val = @intCast(u8, instr & 0xFF);
         const rotate = (instr & 0x0F00) >> 8;
+
+        operand2 = std.math.rotr(u32, imm_val, rotate * 2);
         std.log.debug(
             \\{}:
-            \\  reg1={} (val=0x{X})
-            \\  imm_val=0x{X} (rotate=0x{X})
-            \\  dest_reg={} [set_cond_codes={}]
+            \\  op1=0x{X} (reg1={})
+            \\  op2=0x{X} (imm_val=0x{X}, rot=0x{X})
+            \\  dest_reg={}
+            \\  set_cond_codes={}
         , .{
             opcode,
+            operand1,
             reg1,
-            self.reg[reg1],
+            operand2,
             imm_val,
             rotate,
             dest_reg,
             set_cond_codes,
         });
     } else {
+        // 4.5.2 Shifts
         const reg2 = instr & 0x0F;
         const shift = (instr & 0x0FF0) >> 4;
+
+        const ShiftType = enum(u2) {
+            LogicalLeft,
+            LogicalRight,
+            ArithmeticRight,
+            RotateRight,
+        };
+
+        const shift_val = if (shift & 0x01 == 0x01)
+            // shift value stored in bottom half of a register
+            self.reg[shift >> 4] & 0xFF
+        else
+            // immediate shift amount
+            shift >> 3;
+
+        const shift_type = @intToEnum(ShiftType, (shift & 0b110) >> 1);
+
+        // TODO: set the carry output bit
+        operand2 = switch (shift_type) {
+            .LogicalLeft => std.math.shl(u32, self.reg[reg2], shift_val),
+            .LogicalRight => std.math.shr(u32, self.reg[reg2], shift_val),
+            // unsure if this is right...
+            .ArithmeticRight => @intCast(u32, std.math.shr(i32, @intCast(i32, self.reg[reg2]), shift_val)),
+            .RotateRight => std.math.rotr(u32, self.reg[reg2], shift_val),
+        };
+
         std.log.debug(
             \\{}:
-            \\  reg1={} (val=0x{X})
-            \\  reg2={} (val=0x{X}) (shift=0x{X})
-            \\  dest_reg={} [set_cond_codes={}]
+            \\  op1=0x{X} (reg1={})
+            \\  op2=0x{X} (reg2={}, (val=0x{X}, shift={} by 0x{X}))
+            \\  dest_reg={}
+            \\  set_cond_codes={}
         , .{
             opcode,
+            operand1,
             reg1,
-            self.reg[reg1],
+            operand2,
             reg2,
             self.reg[reg2],
-            shift,
+            shift_type,
+            shift_val,
             dest_reg,
             set_cond_codes,
         });
+    }
+
+    // TODO: CPSR bits
+    const maybe_result: ?u32 = switch (opcode) {
+        .And => operand1 & operand2,
+        .Eor => operand1 ^ operand2,
+        .Sub => operand1 - operand2,
+        .RSub => operand2 - operand1,
+        .Add => operand1 + operand2,
+        .AddC => operand1 + operand2 + @boolToInt(self.cpsr.c),
+        .SubC => operand1 - operand2 + @boolToInt(self.cpsr.c) - 1, // + C
+        .RSubC => operand2 - operand1 + @boolToInt(self.cpsr.c) - 1, // + C
+        .Tst => null, // ADD, but result is not written
+        .TstEq => null, // EOR, but result is not written
+        .Cmp => null, // SUB, but result is not written
+        .CmpM => null, // ADD, but result is not written
+        .Or => operand1 | operand2,
+        .Mov => operand2,
+        .BitClear => operand1 & ~operand2,
+        .MovN => ~operand2,
+    };
+
+    if (maybe_result) |result| {
+        std.log.debug("result (reg{}) = 0x{X}", .{ dest_reg, result });
+        self.reg[dest_reg] = result;
     }
 
     self.reg[PC] += 4;
 }
 
 pub fn dumpRegisters(self: Cpu) void {
+    std.debug.print("\n", .{});
+
     for (self.reg[0..8]) |reg|
         std.debug.print("{X:0>8}  ", .{reg});
     std.debug.print("\n", .{});
 
     for (self.reg[8..16]) |reg|
         std.debug.print("{X:0>8}  ", .{reg});
-    std.debug.print("\n", .{});
+    std.debug.print("\n\n", .{});
 }
