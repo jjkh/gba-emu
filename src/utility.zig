@@ -1,6 +1,15 @@
 const std = @import("std");
 
 pub const Colour = struct {
+    pub const YellowBg = "\x1b[30;43m";
+    pub const RedBg = "\x1b[1;41m";
+    pub const BlueBg = "\x1b[44m";
+    pub const CyanBg = "\x1b[30;46m";
+
+    pub const BrightCyan = "\x1b[1;96m";
+    pub const Yellow = "\x1b[1;93m";
+    pub const Red = "\x1b[31m";
+
     pub const Reset = "\x1b[0m";
     pub const Bold = "\x1b[1m";
     pub const Dim = "\x1b[2m";
@@ -12,6 +21,7 @@ pub const Colour = struct {
     pub const Strikethrough = "\x1b[9m";
 
     pub const DimReset = "\x1b[22m";
+    pub const ItalicReset = "\x1b[23m";
 };
 
 const HexdumpOptions = struct {
@@ -46,7 +56,7 @@ pub fn hexdump(buf: []const u8, target: usize, opt: HexdumpOptions) void {
         std.debug.print(Colour.Dim ++ Colour.Italic ++ "{X:0>8}  " ++ Colour.Reset, .{index + opt.offset});
 
         if (index > highlight_start and index < highlight_end)
-            std.debug.print(Colour.Inverse, .{});
+            std.debug.print(Colour.BlueBg, .{});
 
         // hex view
         {
@@ -60,7 +70,7 @@ pub fn hexdump(buf: []const u8, target: usize, opt: HexdumpOptions) void {
                     std.debug.print(" ", .{});
 
                 if (i == highlight_start)
-                    std.debug.print(Colour.Inverse, .{});
+                    std.debug.print(Colour.BlueBg, .{});
 
                 if (i >= dump_end)
                     std.debug.print("  ", .{})
@@ -71,7 +81,7 @@ pub fn hexdump(buf: []const u8, target: usize, opt: HexdumpOptions) void {
 
         std.debug.print(Colour.Reset ++ "  |  ", .{});
         if (index > highlight_start and index < highlight_end)
-            std.debug.print(Colour.Inverse, .{});
+            std.debug.print(Colour.BlueBg, .{});
 
         // ascii view
         {
@@ -80,7 +90,7 @@ pub fn hexdump(buf: []const u8, target: usize, opt: HexdumpOptions) void {
                 if (i == highlight_end)
                     std.debug.print(Colour.Reset, .{})
                 else if (i == highlight_start)
-                    std.debug.print(Colour.Inverse, .{});
+                    std.debug.print(Colour.BlueBg, .{});
 
                 if (i >= dump_end)
                     std.debug.print(" ", .{})

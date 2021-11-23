@@ -2,6 +2,7 @@ const std = @import("std");
 const Cpu = @This();
 
 const C = @import("utility.zig").Colour;
+const hexdump = @import("utility.zig").hexdump;
 
 // register indices
 const SP = 13;
@@ -84,6 +85,8 @@ const Condition = enum(u4) {
 // status registers - but these cannot all be seen at once. The processor state and
 // operating mode dictate which registers are available to the programmer.
 reg: [16]u32 = std.mem.zeroes([16]u32),
+// used to highlight register differences between runs
+prev_reg: [16]u32 = std.mem.zeroes([16]u32),
 
 // 3.7.1 The ARM state register set
 // The ARM state register set contains 16 directly accessible registers: R0 to R15. All of
@@ -161,25 +164,57 @@ spsr: [5]ProgramStatusRegister = undefined,
 //   10000000-FFFFFFFF   Not used (upper 4bits of address bus unused)
 
 rom: [0x4000]u8 = std.mem.zeroes([0x4000]u8),
-work_ram: [0xC000]u8 = std.mem.zeroes([0xC000]u8),
+external_work_ram: [0x40000]u8 = std.mem.zeroes([0x40000]u8),
+internal_work_ram: [0x8000]u8 = std.mem.zeroes([0x8000]u8),
 game_pak: []const u8 = undefined,
 
 fn readU32(mem: []const u8, offset: u32) u32 {
-    return @ptrCast(*const u32, @alignCast(4, &mem.ptr[offset])).*;
+    return mem[offset] | @as(u32, mem[offset + 1]) << 8 | @as(u32, mem[offset + 2]) << 16 | @as(u32, mem[offset + 3]) << 24;
+    //     return @ptrCast(*const u32, @alignCast(4, &mem.ptr[offset])).*;
+}
+
+fn getBufForAddress(self: Cpu, addr: u32) ?[]const u8 {
+    return switch (addr >> 24) {
+        0x00 => &self.rom,
+        0x02 => &self.external_work_ram,
+        0x03 => &self.internal_work_ram,
+        0x08 => self.game_pak,
+        else => null,
+    };
 }
 
 pub fn read(self: Cpu, addr: u32) !u32 {
     return switch (addr >> 24) {
-        0x00 => readU32(&self.rom, addr),
-        0x03 => readU32(&self.work_ram, addr - 0x0300_0000),
-        0x08 => readU32(self.game_pak, addr - 0x0800_0000),
+        0x00, 0x02, 0x03, 0x08 => readU32(self.getBufForAddress(addr).?, addr & 0x00FF_FFFF),
         // 0x0A => readU32(self.game_pak, addr - 0x0A00_0000),
         // 0x0C => readU32(self.game_pak, addr - 0x0C00_0000),
         else => {
-            std.log.crit("unimplemented address: {X:0>8}", .{addr});
+            std.debug.print("            " ++ C.RedBg ++ "unimplemented address: {X:0>8}" ++ C.Reset ++ "\n", .{addr});
             return error.UnimplementedAddress;
         },
     };
+}
+
+fn writeMmio(self: *Cpu, addr: u32, value: u32) void {
+    _ = value;
+    _ = self;
+
+    switch (addr) {
+        else => std.debug.print("            " ++ C.RedBg ++ "IO 0x{X:0>8} not handled!" ++ C.Reset ++ "\n", .{addr}),
+    }
+}
+
+pub fn write(self: *Cpu, addr: u32, value: u32) void {
+    const buf = switch (addr >> 24) {
+        0x02, 0x03 => self.getBufForAddress(addr).?[addr & 0x00FF_FFFF ..],
+        0x04 => {
+            self.writeMmio(addr, value);
+            return;
+        },
+        else => unreachable,
+    };
+    _ = buf;
+    // std.mem.copy(u8, buf, &std.mem.toBytes(value));
 }
 
 pub fn getNextInstruction(self: Cpu) !u32 {
@@ -279,14 +314,14 @@ pub fn branch(self: *Cpu, instr: u32) void {
     if ((instr & (1 << 24)) != 0) {
         // branch with link - save return address in LR
         self.reg[LR] = self.reg[PC] + 4;
-        std.debug.print("       branch with link\n", .{});
+        std.debug.print("            branch with link\n", .{});
     }
 
     const curr_pos = @intCast(i64, self.reg[PC]);
     const offset = @bitCast(i32, (instr & 0xFF_FFFF) << 2);
     self.reg[PC] = @intCast(u32, curr_pos + offset);
 
-    std.debug.print("       jumping by 0x{X}\n", .{offset});
+    std.debug.print("            jumping by 0x{X}\n", .{offset});
 }
 
 pub fn blockDataTransfer(self: *Cpu, instr: u32) void {
@@ -301,9 +336,108 @@ pub fn blockDataTransfer(self: *Cpu, instr: u32) void {
         _: u7,
     };
 
-    std.debug.print("       {}\n", .{@bitCast(BdtInstr, instr)});
+    std.debug.print("            {}\n", .{@bitCast(BdtInstr, instr)});
 
     self.reg[PC] += 4;
+}
+
+pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
+    const SdtInstr = packed struct {
+        offset: u12,
+        src_dst_reg: u4,
+        base_reg: u4,
+        type: enum(u1) { Store, Load },
+        write_back: bool,
+        quantity: enum(u1) { Word, Byte },
+        dir: enum(u1) { Down, Up },
+        index: enum(u1) { Post, Pre },
+        offset_type: enum(u1) { Immediate, Register },
+        _: u6,
+    };
+
+    const sdt = @bitCast(SdtInstr, instr);
+    // std.debug.print("       {}\n", .{sdt});
+
+    // unsure if this is correct
+    if (sdt.index == .Pre)
+        self.reg[PC] += 4;
+
+    const base_value = self.reg[sdt.base_reg];
+    const offset = if (sdt.offset_type == .Immediate)
+        sdt.offset
+    else
+        self.shift(self.reg[sdt.offset & 0x0F], @intCast(u8, sdt.offset >> 4), false);
+    const mem_addr = if (sdt.dir == .Up)
+        base_value + offset
+    else
+        base_value - offset;
+
+    std.debug.print("            {} at mem_addr=0x{X} (base_val=0x{X}, offset=0x{X})\n", .{
+        sdt.type,
+        mem_addr,
+        base_value,
+        offset,
+    });
+
+    if (sdt.type == .Load) {
+        if (sdt.quantity == .Byte) {
+            self.reg[sdt.src_dst_reg] = (try self.read(mem_addr)) & 0xFF;
+        } else {
+            // TODO: non-word-aligned loads
+            self.reg[sdt.src_dst_reg] = try self.read(mem_addr);
+        }
+    } else {
+        if (sdt.quantity == .Byte) {
+            // is this really correct?
+            const byte: u32 = self.reg[sdt.src_dst_reg] & 0xFF;
+            const word = byte | byte << 8 | byte << 16 | byte << 24;
+
+            self.write(mem_addr, word);
+        } else {
+            self.write(mem_addr, self.reg[sdt.src_dst_reg]);
+        }
+    }
+    if (self.getBufForAddress(mem_addr)) |buf| {
+        const addr = mem_addr & 0x00FF_FFFF;
+
+        std.debug.print(" \n", .{});
+        hexdump(buf, addr, .{
+            .line_length = 16,
+            .context = 2,
+            .offset = mem_addr & 0xFF00_0000,
+            .highlight = if (sdt.quantity == .Word) .{ .start = addr, .end = addr + 4 } else null,
+        });
+    }
+
+    if (sdt.index == .Post)
+        self.reg[PC] += 4;
+}
+
+fn shift(self: *Cpu, operand: u32, shift_field: u8, allow_reg_shift: bool) u32 {
+    // TODO: follow "Register specified shift amount" more correctly
+    const val = if (allow_reg_shift and shift_field & 0x01 == 0x01)
+        // shift value stored in least significant byte of a register
+        self.reg[shift_field >> 4] & 0x0F
+    else
+        // immediate shift amount
+        shift_field >> 3;
+
+    const ShiftType = enum(u2) {
+        LogicalLeft,
+        LogicalRight,
+        ArithmeticRight,
+        RotateRight,
+    };
+    const shift_type = @intToEnum(ShiftType, (shift_field & 0b110) >> 1);
+
+    // TODO: set the carry output bit
+    return switch (shift_type) {
+        .LogicalLeft => std.math.shl(u32, operand, val),
+        .LogicalRight => std.math.shr(u32, operand, val),
+        // unsure if this is right...
+        .ArithmeticRight => @intCast(u32, std.math.shr(i32, @intCast(i32, operand), val)),
+        .RotateRight => std.math.rotr(u32, operand, val),
+    };
 }
 
 pub fn dataProcessing(self: *Cpu, instr: u32) void {
@@ -372,11 +506,11 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
 
         op2 = std.math.rotr(u32, imm_val, rotate * 2);
         std.debug.print(
-            \\       {}:
-            \\           op1=0x{X} (reg1={})
-            \\           op2=0x{X} (imm_val=0x{X}, rot=0x{X})
-            \\           dest_reg={}
-            \\           set_cond_codes={}
+            \\            {}:
+            \\                op1=0x{X} (reg1={})
+            \\                op2=0x{X} (imm_val=0x{X}, rot=0x{X})
+            \\                dest_reg={}
+            \\                set_cond_codes={}
             \\
         , .{
             opcode,
@@ -391,39 +525,16 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
     } else {
         // 4.5.2 Shifts
         const reg2 = instr & 0x0F;
-        const shift = (instr & 0x0FF0) >> 4;
+        const shift_field = @intCast(u8, (instr & 0x0FF0) >> 4);
 
-        const ShiftType = enum(u2) {
-            LogicalLeft,
-            LogicalRight,
-            ArithmeticRight,
-            RotateRight,
-        };
-
-        const shift_val = if (shift & 0x01 == 0x01)
-            // shift value stored in bottom half of a register
-            self.reg[shift >> 4] & 0xFF
-        else
-            // immediate shift amount
-            shift >> 3;
-
-        const shift_type = @intToEnum(ShiftType, (shift & 0b110) >> 1);
-
-        // TODO: set the carry output bit
-        op2 = switch (shift_type) {
-            .LogicalLeft => std.math.shl(u32, self.reg[reg2], shift_val),
-            .LogicalRight => std.math.shr(u32, self.reg[reg2], shift_val),
-            // unsure if this is right...
-            .ArithmeticRight => @intCast(u32, std.math.shr(i32, @intCast(i32, self.reg[reg2]), shift_val)),
-            .RotateRight => std.math.rotr(u32, self.reg[reg2], shift_val),
-        };
+        op2 = self.shift(self.reg[reg2], shift_field, true);
 
         std.debug.print(
-            \\       {}:
-            \\           op1=0x{X} (reg1={})
-            \\           op2=0x{X} (reg2={}, (val=0x{X}, shift={} by 0x{X}))
-            \\           dest_reg={}
-            \\           set_cond_codes={}
+            \\            {}:
+            \\                op1=0x{X} (reg1={})
+            \\                op2=0x{X} (reg2={}, (val=0x{X}, shift_field=0x{X}))
+            \\                dest_reg={}
+            \\                set_cond_codes={}
             \\
         , .{
             opcode,
@@ -432,8 +543,7 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
             op2,
             reg2,
             self.reg[reg2],
-            shift_type,
-            shift_val,
+            shift_field,
             dest_reg,
             set_cond_codes,
         });
@@ -472,16 +582,16 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
     }
 
     if (opcode.shouldWriteResult()) {
-        std.debug.print("       reg{} <- 0x{X}\n", .{ dest_reg, result });
+        std.debug.print("            reg{} <- 0x{X}\n", .{ dest_reg, result });
         self.reg[dest_reg] = result;
     }
 
     self.reg[PC] += 4;
 }
 
-pub fn dumpRegisters(self: Cpu) void {
-    std.debug.print("\n+- Register Dump ------------------------------------------------------------------+\n", .{});
-    std.debug.print("| CPSR: N={} Z={} C={} V={}  |  I={} F={}  |  T={}  |  Mode={b:0>5}                         |\n", .{
+pub fn dumpRegisters(self: *Cpu) void {
+    std.debug.print("\n+--- Register Dump ----------------------------------------------------------------+\n", .{});
+    std.debug.print("|  CPSR: N={} Z={} C={} V={}  |  I={} F={}  |  T={}  |  Mode={b:0>5}                        |\n", .{
         @boolToInt(self.cpsr.n),
         @boolToInt(self.cpsr.z),
         @boolToInt(self.cpsr.c),
@@ -492,14 +602,18 @@ pub fn dumpRegisters(self: Cpu) void {
         self.cpsr.mode,
     });
 
-    std.debug.print("| ", .{});
-    for (self.reg[0..8]) |reg|
-        std.debug.print("{X:0>8}  ", .{reg});
-    std.debug.print(" |\n", .{});
+    std.debug.print("|  ", .{});
+    for (self.reg[0..16]) |reg, i| {
+        if (reg != self.prev_reg[i])
+            std.debug.print(C.YellowBg, .{});
 
-    std.debug.print("| ", .{});
-    for (self.reg[8..16]) |reg|
-        std.debug.print("{X:0>8}  ", .{reg});
-    std.debug.print(" |\n", .{});
+        std.debug.print("{X:0>8}" ++ C.Reset ++ "  ", .{reg});
+
+        self.prev_reg[i] = reg;
+
+        if (i == 7)
+            std.debug.print("|\n|  ", .{});
+    }
+    std.debug.print("|\n", .{});
     std.debug.print("+----------------------------------------------------------------------------------+\n\n", .{});
 }
