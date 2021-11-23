@@ -322,6 +322,22 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
         Mov, // op 1 is ignored
         BitClear,
         MovN, // op 1 is ignored
+
+        const OpcodeType = enum { Logical, Arithmetic };
+
+        pub fn opType(opcode: @This()) OpcodeType {
+            return switch (opcode) {
+                .And, .Eor, .Tst, .TstEq, .Or, .Mov, .BitClear, .MovN => .Logical,
+                else => .Arithmetic,
+            };
+        }
+
+        pub fn shouldWriteResult(opcode: @This()) bool {
+            return switch (opcode) {
+                .Tst, .TstEq, .Cmp, .CmpM => false,
+                else => true,
+            };
+        }
     };
 
     const opcode = @intToEnum(Opcode, (instr & 0x01E0_0000) >> 21);
@@ -400,26 +416,39 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
     }
 
     // TODO: CPSR bits
-    const maybe_result: ?u32 = switch (opcode) {
-        .And => operand1 & operand2,
-        .Eor => operand1 ^ operand2,
-        .Sub => operand1 - operand2,
+    const result: u32 = switch (opcode) {
+        .And, .Tst => operand1 & operand2,
+        .Eor, .TstEq => operand1 ^ operand2,
+        .Sub, .Cmp => operand1 - operand2,
         .RSub => operand2 - operand1,
-        .Add => operand1 + operand2,
+        .Add, .CmpM => operand1 + operand2,
         .AddC => operand1 + operand2 + @boolToInt(self.cpsr.c),
-        .SubC => operand1 - operand2 + @boolToInt(self.cpsr.c) - 1, // + C
-        .RSubC => operand2 - operand1 + @boolToInt(self.cpsr.c) - 1, // + C
-        .Tst => null, // ADD, but result is not written
-        .TstEq => null, // EOR, but result is not written
-        .Cmp => null, // SUB, but result is not written
-        .CmpM => null, // ADD, but result is not written
+        .SubC => operand1 - operand2 + @boolToInt(self.cpsr.c) - 1,
+        .RSubC => operand2 - operand1 + @boolToInt(self.cpsr.c) - 1,
         .Or => operand1 | operand2,
         .Mov => operand2,
         .BitClear => operand1 & ~operand2,
         .MovN => ~operand2,
     };
 
-    if (maybe_result) |result| {
+    // 4.5.1 CPSR flags
+    if (set_cond_codes and dest_reg != 15) {
+        if (opcode.opType() == .Logical) {
+            // V is unaffected
+            // TODO: carry out from the barrel shifter, or preserved when the shift operation is LSL #0
+            // self.cpsr.c = ?; 
+        } else {
+            // TODO: set if an overflow occurs into bit 31 of the result?
+            // self.cpsr.v = ?;
+            // TODO: carry out of the ALU
+            // self.cpsr.c = ?;
+        }
+        
+        self.cpsr.z = result == 0;
+        self.cpsr.n = result >> 31 == 1;
+    }
+
+    if (opcode.shouldWriteResult()) {
         std.log.debug("result (reg{}) = 0x{X}", .{ dest_reg, result });
         self.reg[dest_reg] = result;
     }
