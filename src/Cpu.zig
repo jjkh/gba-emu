@@ -1,6 +1,8 @@
 const std = @import("std");
 const Cpu = @This();
 
+const C = @import("utility.zig").Colour;
+
 // register indices
 const SP = 13;
 const LR = 14;
@@ -186,7 +188,7 @@ pub fn getNextInstruction(self: Cpu) u32 {
 
 pub fn checkCondition(self: Cpu, instr: u32) bool {
     const condition = @intToEnum(Condition, instr >> 28);
-    std.log.debug("  {}", .{condition});
+    std.debug.print(C.Italic ++ C.Underline ++ "{}" ++ C.Reset ++ "\n", .{condition});
 
     return switch (condition) {
         .Equal => self.cpsr.z,
@@ -277,14 +279,14 @@ pub fn branch(self: *Cpu, instr: u32) void {
     if ((instr & (1 << 24)) != 0) {
         // branch with link - save return address in LR
         self.reg[LR] = self.reg[PC] + 4;
-        std.log.debug("link!", .{});
+        std.debug.print("       branch with link\n", .{});
     }
 
     const curr_pos = @intCast(i64, self.reg[PC]);
     const offset = @bitCast(i32, (instr & 0xFF_FFFF) << 2);
     self.reg[PC] = @intCast(u32, curr_pos + offset);
 
-    std.log.debug("moving by offset 0x{X}", .{offset});
+    std.debug.print("       moving by offset 0x{X}\n", .{offset});
 }
 
 pub fn blockDataTransfer(self: *Cpu, instr: u32) void {
@@ -299,7 +301,7 @@ pub fn blockDataTransfer(self: *Cpu, instr: u32) void {
         _: u7,
     };
 
-    std.log.debug("{}", .{@bitCast(BdtInstr, instr)});
+    std.debug.print("       {}\n", .{@bitCast(BdtInstr, instr)});
 
     self.reg[PC] += 4;
 }
@@ -369,12 +371,13 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
         const rotate = (instr & 0x0F00) >> 8;
 
         operand2 = std.math.rotr(u32, imm_val, rotate * 2);
-        std.log.debug(
-            \\{}:
-            \\  op1=0x{X} (reg1={})
-            \\  op2=0x{X} (imm_val=0x{X}, rot=0x{X})
-            \\  dest_reg={}
-            \\  set_cond_codes={}
+        std.debug.print(
+            \\       {}:
+            \\           op1=0x{X} (reg1={})
+            \\           op2=0x{X} (imm_val=0x{X}, rot=0x{X})
+            \\           dest_reg={}
+            \\           set_cond_codes={}
+            \\
         , .{
             opcode,
             operand1,
@@ -415,12 +418,13 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
             .RotateRight => std.math.rotr(u32, self.reg[reg2], shift_val),
         };
 
-        std.log.debug(
-            \\{}:
-            \\  op1=0x{X} (reg1={})
-            \\  op2=0x{X} (reg2={}, (val=0x{X}, shift={} by 0x{X}))
-            \\  dest_reg={}
-            \\  set_cond_codes={}
+        std.debug.print(
+            \\       {}:
+            \\           op1=0x{X} (reg1={})
+            \\           op2=0x{X} (reg2={}, (val=0x{X}, shift={} by 0x{X}))
+            \\           dest_reg={}
+            \\           set_cond_codes={}
+            \\
         , .{
             opcode,
             operand1,
@@ -456,20 +460,20 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
         if (opcode.opType() == .Logical) {
             // V is unaffected
             // TODO: carry out from the barrel shifter, or preserved when the shift operation is LSL #0
-            // self.cpsr.c = ?; 
+            // self.cpsr.c = ?;
         } else {
             // TODO: set if an overflow occurs into bit 31 of the result?
             // self.cpsr.v = ?;
             // TODO: carry out of the ALU
             // self.cpsr.c = ?;
         }
-        
+
         self.cpsr.z = result == 0;
         self.cpsr.n = result >> 31 == 1;
     }
 
     if (opcode.shouldWriteResult()) {
-        std.log.debug("result (reg{}) = 0x{X}", .{ dest_reg, result });
+        std.debug.print("       reg{} <- 0x{X}\n", .{ dest_reg, result });
         self.reg[dest_reg] = result;
     }
 
@@ -477,13 +481,26 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
 }
 
 pub fn dumpRegisters(self: Cpu) void {
-    std.debug.print("\n", .{});
+    std.debug.print("\n+- Register Dump ------------------------------------------------------------------+\n", .{});
+    std.debug.print("| CPSR: N={} Z={} C={} V={}  |  I={} F={}  |  T={}  |  Mode={b:0>5}                         |\n", .{
+        @boolToInt(self.cpsr.n),
+        @boolToInt(self.cpsr.z),
+        @boolToInt(self.cpsr.c),
+        @boolToInt(self.cpsr.v),
+        @boolToInt(self.cpsr.i),
+        @boolToInt(self.cpsr.f),
+        @boolToInt(self.cpsr.t),
+        self.cpsr.mode,
+    });
 
+    std.debug.print("| ", .{});
     for (self.reg[0..8]) |reg|
         std.debug.print("{X:0>8}  ", .{reg});
-    std.debug.print("\n", .{});
+    std.debug.print(" |\n", .{});
 
+    std.debug.print("| ", .{});
     for (self.reg[8..16]) |reg|
         std.debug.print("{X:0>8}  ", .{reg});
-    std.debug.print("\n\n", .{});
+    std.debug.print(" |\n", .{});
+    std.debug.print("+----------------------------------------------------------------------------------+\n\n", .{});
 }
