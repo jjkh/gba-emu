@@ -20,7 +20,7 @@ pub fn main() anyerror!void {
             prog_counter,
             cpu.reg[15],
             instr,
-            Cpu.checkCondition(instr),
+            cpu.checkCondition(instr),
             Cpu.decode(instr),
         });
         std.debug.print("  {b:0>32}\n", .{instr});

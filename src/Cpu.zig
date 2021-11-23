@@ -43,7 +43,7 @@ const ProgramStatusRegister = packed struct {
 // determines the circumstances under which an instruction is to be executed. If the state
 // of the C, N, Z and V flags fulfils the conditions encoded by the field, the instruction is
 // executed, otherwise it is ignored.
-const Cond = enum(u4) {
+const Condition = enum(u4) {
     // EQ (Z set)
     Equal,
     // NE (Z clear)
@@ -184,8 +184,28 @@ pub fn getNextInstruction(self: Cpu) u32 {
     return self.read(self.reg[PC]);
 }
 
-pub fn checkCondition(instr: u32) Cond {
-    return @intToEnum(Cond, instr >> 28);
+pub fn checkCondition(self: Cpu, instr: u32) bool {
+    const condition = @intToEnum(Condition, instr >> 28);
+    std.log.debug("  {}", .{condition});
+
+    return switch (condition) {
+        .Equal => self.cpsr.z,
+        .NotEqual => !self.cpsr.z,
+        .UnsignedHigherOrSame => self.cpsr.c,
+        .UnsignedLower => !self.cpsr.c,
+        .Negative => self.cpsr.n,
+        .PositiveOrZero => !self.cpsr.n,
+        .Overflow => self.cpsr.v,
+        .NoOverflow => !self.cpsr.v,
+        .UnsignedHigher => self.cpsr.c and !self.cpsr.z,
+        .UnsignedLowerOrSame => !self.cpsr.c or self.cpsr.z,
+        .GreaterOrEqual => self.cpsr.n == self.cpsr.v,
+        .LessThan => self.cpsr.n != self.cpsr.v,
+        .GreaterThan => !self.cpsr.z and (self.cpsr.n == self.cpsr.v),
+        .LessThanOrEqual => self.cpsr.z or (self.cpsr.n != self.cpsr.v),
+        .Always => true,
+        else => unreachable,
+    };
 }
 
 pub fn decode(instr: u32) InstructionType {
