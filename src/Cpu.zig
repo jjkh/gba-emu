@@ -168,21 +168,21 @@ fn readU32(mem: []const u8, offset: u32) u32 {
     return @ptrCast(*const u32, @alignCast(4, &mem.ptr[offset])).*;
 }
 
-pub fn read(self: Cpu, addr: u32) u32 {
+pub fn read(self: Cpu, addr: u32) !u32 {
     return switch (addr >> 24) {
         0x00 => readU32(&self.rom, addr),
         0x03 => readU32(&self.work_ram, addr - 0x0300_0000),
         0x08 => readU32(self.game_pak, addr - 0x0800_0000),
-        0x0A => readU32(self.game_pak, addr - 0x0A00_0000),
-        0x0C => readU32(self.game_pak, addr - 0x0C00_0000),
+        // 0x0A => readU32(self.game_pak, addr - 0x0A00_0000),
+        // 0x0C => readU32(self.game_pak, addr - 0x0C00_0000),
         else => {
             std.log.crit("unimplemented address: {X:0>8}", .{addr});
-            unreachable;
+            return error.UnimplementedAddress;
         },
     };
 }
 
-pub fn getNextInstruction(self: Cpu) u32 {
+pub fn getNextInstruction(self: Cpu) !u32 {
     return self.read(self.reg[PC]);
 }
 
@@ -286,7 +286,7 @@ pub fn branch(self: *Cpu, instr: u32) void {
     const offset = @bitCast(i32, (instr & 0xFF_FFFF) << 2);
     self.reg[PC] = @intCast(u32, curr_pos + offset);
 
-    std.debug.print("       moving by offset 0x{X}\n", .{offset});
+    std.debug.print("       jumping by 0x{X}\n", .{offset});
 }
 
 pub fn blockDataTransfer(self: *Cpu, instr: u32) void {
@@ -364,13 +364,13 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
 
     const opcode = @intToEnum(Opcode, (instr & 0x01E0_0000) >> 21);
 
-    var operand1: u32 = self.reg[reg1];
-    var operand2: u32 = undefined;
+    var op1: u32 = self.reg[reg1];
+    var op2: u32 = undefined;
     if (immediate) {
         const imm_val = @intCast(u8, instr & 0xFF);
         const rotate = (instr & 0x0F00) >> 8;
 
-        operand2 = std.math.rotr(u32, imm_val, rotate * 2);
+        op2 = std.math.rotr(u32, imm_val, rotate * 2);
         std.debug.print(
             \\       {}:
             \\           op1=0x{X} (reg1={})
@@ -380,9 +380,9 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
             \\
         , .{
             opcode,
-            operand1,
+            op1,
             reg1,
-            operand2,
+            op2,
             imm_val,
             rotate,
             dest_reg,
@@ -410,7 +410,7 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
         const shift_type = @intToEnum(ShiftType, (shift & 0b110) >> 1);
 
         // TODO: set the carry output bit
-        operand2 = switch (shift_type) {
+        op2 = switch (shift_type) {
             .LogicalLeft => std.math.shl(u32, self.reg[reg2], shift_val),
             .LogicalRight => std.math.shr(u32, self.reg[reg2], shift_val),
             // unsure if this is right...
@@ -427,9 +427,9 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
             \\
         , .{
             opcode,
-            operand1,
+            op1,
             reg1,
-            operand2,
+            op2,
             reg2,
             self.reg[reg2],
             shift_type,
@@ -439,20 +439,19 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
         });
     }
 
-    // TODO: CPSR bits
     const result: u32 = switch (opcode) {
-        .And, .Tst => operand1 & operand2,
-        .Eor, .TstEq => operand1 ^ operand2,
-        .Sub, .Cmp => operand1 - operand2,
-        .RSub => operand2 - operand1,
-        .Add, .CmpM => operand1 + operand2,
-        .AddC => operand1 + operand2 + @boolToInt(self.cpsr.c),
-        .SubC => operand1 - operand2 + @boolToInt(self.cpsr.c) - 1,
-        .RSubC => operand2 - operand1 + @boolToInt(self.cpsr.c) - 1,
-        .Or => operand1 | operand2,
-        .Mov => operand2,
-        .BitClear => operand1 & ~operand2,
-        .MovN => ~operand2,
+        .And, .Tst => op1 & op2,
+        .Eor, .TstEq => op1 ^ op2,
+        .Sub, .Cmp => op1 - op2,
+        .RSub => op2 - op1,
+        .Add, .CmpM => op1 + op2,
+        .AddC => op1 + op2 + @boolToInt(self.cpsr.c),
+        .SubC => op1 - op2 + @boolToInt(self.cpsr.c) - 1,
+        .RSubC => op2 - op1 + @boolToInt(self.cpsr.c) - 1,
+        .Or => op1 | op2,
+        .Mov => op2,
+        .BitClear => op1 & ~op2,
+        .MovN => ~op2,
     };
 
     // 4.5.1 CPSR flags
