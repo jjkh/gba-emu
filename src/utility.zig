@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Colour = struct {
+pub const TextFormat = struct {
     pub const YellowBg = "\x1b[30;43m";
     pub const RedBg = "\x1b[1;41m";
     pub const BlueBg = "\x1b[44m";
@@ -53,10 +53,10 @@ pub fn hexdump(buf: []const u8, target: usize, opt: HexdumpOptions) void {
 
     var index: usize = dump_start;
     while (index < dump_end) : (index += opt.line_length) {
-        std.debug.print(Colour.Dim ++ Colour.Italic ++ "{X:0>8}  " ++ Colour.Reset, .{index + opt.offset});
+        std.debug.print(TextFormat.Dim ++ TextFormat.Italic ++ "{X:0>8}  " ++ TextFormat.Reset, .{index + opt.offset});
 
         if (index > highlight_start and index < highlight_end)
-            std.debug.print(Colour.BlueBg, .{});
+            std.debug.print(TextFormat.BlueBg, .{});
 
         // hex view
         {
@@ -64,13 +64,13 @@ pub fn hexdump(buf: []const u8, target: usize, opt: HexdumpOptions) void {
 
             while (i < index + opt.line_length) : (i += 1) {
                 if (i == highlight_end)
-                    std.debug.print(Colour.Reset, .{});
+                    std.debug.print(TextFormat.Reset, .{});
 
                 if (i % 2 == 0)
                     std.debug.print(" ", .{});
 
                 if (i == highlight_start)
-                    std.debug.print(Colour.BlueBg, .{});
+                    std.debug.print(TextFormat.BlueBg, .{});
 
                 if (i >= dump_end)
                     std.debug.print("  ", .{})
@@ -79,18 +79,18 @@ pub fn hexdump(buf: []const u8, target: usize, opt: HexdumpOptions) void {
             }
         }
 
-        std.debug.print(Colour.Reset ++ "  |  ", .{});
+        std.debug.print(TextFormat.Reset ++ "  |  ", .{});
         if (index > highlight_start and index < highlight_end)
-            std.debug.print(Colour.BlueBg, .{});
+            std.debug.print(TextFormat.BlueBg, .{});
 
         // ascii view
         {
             var i: usize = index;
             while (i < index + opt.line_length) : (i += 1) {
                 if (i == highlight_end)
-                    std.debug.print(Colour.Reset, .{})
+                    std.debug.print(TextFormat.Reset, .{})
                 else if (i == highlight_start)
-                    std.debug.print(Colour.BlueBg, .{});
+                    std.debug.print(TextFormat.BlueBg, .{});
 
                 if (i >= dump_end)
                     std.debug.print(" ", .{})
@@ -99,10 +99,10 @@ pub fn hexdump(buf: []const u8, target: usize, opt: HexdumpOptions) void {
                 else if (i >= highlight_start and i <= highlight_end)
                     std.debug.print(".", .{})
                 else
-                    std.debug.print(Colour.Dim ++ "." ++ Colour.DimReset, .{});
+                    std.debug.print(TextFormat.Dim ++ "." ++ TextFormat.DimReset, .{});
             }
         }
-        std.debug.print(Colour.Reset ++ "\n", .{});
+        std.debug.print(TextFormat.Reset ++ "\n", .{});
     }
 }
 

@@ -1,7 +1,7 @@
 const std = @import("std");
 const Cpu = @import("Cpu.zig");
 
-const C = @import("utility.zig").Colour;
+const TF = @import("utility.zig").TextFormat;
 const hexdump = @import("utility.zig").hexdump;
 const waitForUserInput = @import("utility.zig").waitForUserInput;
 
@@ -38,7 +38,7 @@ pub fn main() anyerror!void {
         const is_thumb = cpu.cpsr.t;
         const should_run = cpu.checkCondition(instr);
         {
-            if (!should_run) std.debug.print(C.Dim, .{});
+            if (!should_run) std.debug.print(TF.Dim, .{});
             std.debug.print(
                 "{X:0>8}  {X:0>8}\n          ",
                 .{ cpu.reg[15], instr },
@@ -48,8 +48,8 @@ pub fn main() anyerror!void {
             else
                 std.debug.print("\r    {b:0>32}\n          ", .{instr});
 
-            if (should_run) std.debug.print(C.BrightCyan, .{});
-            std.debug.print("{}" ++ C.Reset ++ "\n", .{cpu.decode(instr)});
+            if (should_run) std.debug.print(TF.BrightCyan, .{});
+            std.debug.print("{}" ++ TF.Reset ++ "\n", .{cpu.decode(instr)});
         }
         if (!should_run) {
             cpu.reg[15] += 4;

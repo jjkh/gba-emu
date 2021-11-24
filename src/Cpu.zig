@@ -1,7 +1,7 @@
 const std = @import("std");
 const Cpu = @This();
 
-const C = @import("utility.zig").Colour;
+const TF = @import("utility.zig").TextFormat;
 const hexdump = @import("utility.zig").hexdump;
 
 // register indices
@@ -223,7 +223,7 @@ pub fn read(self: Cpu, addr: u32) !u32 {
         // 0x0A => readU32(self.game_pak, addr - 0x0A00_0000),
         // 0x0C => readU32(self.game_pak, addr - 0x0C00_0000),
         else => {
-            std.debug.print("            " ++ C.RedBg ++ "unimplemented address: {X:0>8}" ++ C.Reset ++ "\n", .{addr});
+            std.debug.print("            " ++ TF.RedBg ++ "unimplemented address: {X:0>8}" ++ TF.Reset ++ "\n", .{addr});
             return error.UnimplementedAddress;
         },
     };
@@ -234,7 +234,7 @@ fn writeMmio(self: *Cpu, addr: u32, value: u32) void {
     _ = self;
 
     switch (addr) {
-        else => std.debug.print("            " ++ C.RedBg ++ "IO 0x{X:0>8} not handled!" ++ C.Reset ++ "\n", .{addr}),
+        else => std.debug.print("            " ++ TF.RedBg ++ "IO 0x{X:0>8} not handled!" ++ TF.Reset ++ "\n", .{addr}),
     }
 }
 
@@ -263,7 +263,7 @@ pub fn checkCondition(self: Cpu, instr: u32) bool {
         return true;
 
     const condition = @intToEnum(Condition, instr >> 28);
-    std.debug.print(C.Italic ++ C.Underline ++ "{}" ++ C.Reset ++ "\n", .{condition});
+    std.debug.print(TF.Italic ++ TF.Underline ++ "{}" ++ TF.Reset ++ "\n", .{condition});
 
     return switch (condition) {
         .Equal => self.cpsr.z,
@@ -803,9 +803,9 @@ pub fn dumpRegisters(self: *Cpu) void {
     std.debug.print("|  ", .{});
     for (self.reg[0..16]) |reg, i| {
         if (reg != self.prev_reg[i])
-            std.debug.print(C.YellowBg, .{});
+            std.debug.print(TF.YellowBg, .{});
 
-        std.debug.print("{X:0>8}" ++ C.Reset ++ "  ", .{reg});
+        std.debug.print("{X:0>8}" ++ TF.Reset ++ "  ", .{reg});
 
         self.prev_reg[i] = reg;
 
