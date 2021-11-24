@@ -28,7 +28,7 @@ pub fn main() anyerror!void {
 
     var prog_counter: usize = 0;
     while (true) : (prog_counter += 1) {
-        var instr: u32 = cpu.getNextInstruction() catch return;
+        var instr: u32 = cpu.getNextInstruction() catch break;
         cpu.dumpRegisters();
 
         const should_run = cpu.checkCondition(instr);
@@ -41,19 +41,20 @@ pub fn main() anyerror!void {
             // std.debug.print("  {b:0>32}\n", .{instr});
 
             if (should_run) std.debug.print(C.BrightCyan, .{});
-            std.debug.print("{}" ++ C.Reset ++ "\n", .{Cpu.decode(instr)});
+            std.debug.print("{}" ++ C.Reset ++ "\n", .{cpu.decode(instr)});
         }
         if (!should_run) {
             cpu.reg[15] += 4;
             continue;
         }
 
-        switch (Cpu.decode(instr)) {
+        switch (cpu.decode(instr)) {
             .Branch => cpu.branch(instr),
-            .SingleDataTransfer => try cpu.singleDataTransfer(instr),
+            .BranchExchange => cpu.branchExchange(instr),
+            .SingleDataTransfer => cpu.singleDataTransfer(instr) catch break,
             .BlockDataTransfer => cpu.blockDataTransfer(instr),
             .DataProcessing => cpu.dataProcessing(instr),
-            else => cpu.reg[15] += 4,
+            else => cpu.incrementProgramCounter(),
         }
         _ = prog_counter;
     }

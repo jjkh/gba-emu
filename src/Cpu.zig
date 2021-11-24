@@ -183,6 +183,14 @@ fn getBufForAddress(self: Cpu, addr: u32) ?[]const u8 {
     };
 }
 
+fn getMutableBufForAddress(self: *Cpu, addr: u32) ?[]u8 {
+    return switch (addr >> 24) {
+        0x02 => &self.external_work_ram,
+        0x03 => &self.internal_work_ram,
+        else => null,
+    };
+}
+
 pub fn read(self: Cpu, addr: u32) !u32 {
     return switch (addr >> 24) {
         0x00, 0x02, 0x03, 0x08 => readU32(self.getBufForAddress(addr).?, addr & 0x00FF_FFFF),
@@ -206,15 +214,14 @@ fn writeMmio(self: *Cpu, addr: u32, value: u32) void {
 
 pub fn write(self: *Cpu, addr: u32, value: u32) void {
     const buf = switch (addr >> 24) {
-        0x02, 0x03 => self.getBufForAddress(addr).?[addr & 0x00FF_FFFF ..],
+        0x02, 0x03 => self.getMutableBufForAddress(addr).?[addr & 0x00FF_FFFF ..],
         0x04 => {
             self.writeMmio(addr, value);
             return;
         },
         else => unreachable,
     };
-    _ = buf;
-    // std.mem.copy(u8, buf, &std.mem.toBytes(value));
+    std.mem.copy(u8, buf, &std.mem.toBytes(value));
 }
 
 pub fn getNextInstruction(self: Cpu) !u32 {
@@ -222,6 +229,10 @@ pub fn getNextInstruction(self: Cpu) !u32 {
 }
 
 pub fn checkCondition(self: Cpu, instr: u32) bool {
+    // THUMB instructions do not have the condition field at the start of each opcode
+    if (self.cpsr.t)
+        return true;
+
     const condition = @intToEnum(Condition, instr >> 28);
     std.debug.print(C.Italic ++ C.Underline ++ "{}" ++ C.Reset ++ "\n", .{condition});
 
@@ -245,7 +256,19 @@ pub fn checkCondition(self: Cpu, instr: u32) bool {
     };
 }
 
-pub fn decode(instr: u32) InstructionType {
+pub fn decode(self: Cpu, instr: u32) InstructionType {
+    return if (self.cpsr.t)
+        decodeThumb(@intCast(u16, instr & 0x0000_FFFF))
+    else
+        decodeArm(instr);
+}
+
+fn decodeThumb(instr: u16) InstructionType {
+    _ = instr;
+    return .Unknown;
+}
+
+fn decodeArm(instr: u32) InstructionType {
     // 4.3 Branch and Exchange (BX)
     // swaps between THUMB and ARM instruction sets
     if ((instr & 0x0fff_fff0) == 0x012f_ff10)
@@ -324,6 +347,20 @@ pub fn branch(self: *Cpu, instr: u32) void {
     std.debug.print("            jumping by 0x{X}\n", .{offset});
 }
 
+pub fn branchExchange(self: *Cpu, instr: u32) void {
+    const base_reg = instr & 0x0F;
+    const toThumb = self.reg[base_reg] & 0x01 == 0x01;
+
+    std.debug.print("            T={} -> T={} (reg{})\n", .{
+        self.cpsr.t,
+        toThumb,
+        base_reg,
+    });
+
+    self.cpsr.t = toThumb;
+    self.incrementProgramCounter();
+}
+
 pub fn blockDataTransfer(self: *Cpu, instr: u32) void {
     const BdtInstr = packed struct {
         reg_list: u16,
@@ -338,7 +375,7 @@ pub fn blockDataTransfer(self: *Cpu, instr: u32) void {
 
     std.debug.print("            {}\n", .{@bitCast(BdtInstr, instr)});
 
-    self.reg[PC] += 4;
+    self.incrementProgramCounter();
 }
 
 pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
@@ -360,7 +397,7 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
 
     // unsure if this is correct
     if (sdt.index == .Pre)
-        self.reg[PC] += 4;
+        self.incrementProgramCounter();
 
     const base_value = self.reg[sdt.base_reg];
     const offset = if (sdt.offset_type == .Immediate)
@@ -410,7 +447,7 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
     }
 
     if (sdt.index == .Post)
-        self.reg[PC] += 4;
+        self.incrementProgramCounter();
 }
 
 fn shift(self: *Cpu, operand: u32, shift_field: u8, allow_reg_shift: bool) u32 {
@@ -586,7 +623,7 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
         self.reg[dest_reg] = result;
     }
 
-    self.reg[PC] += 4;
+    self.incrementProgramCounter();
 }
 
 pub fn dumpRegisters(self: *Cpu) void {
@@ -616,4 +653,11 @@ pub fn dumpRegisters(self: *Cpu) void {
     }
     std.debug.print("|\n", .{});
     std.debug.print("+----------------------------------------------------------------------------------+\n\n", .{});
+}
+
+pub fn incrementProgramCounter(self: *Cpu) void {
+    if (self.cpsr.t)
+        self.reg[PC] += 2
+    else
+        self.reg[PC] += 4;
 }
