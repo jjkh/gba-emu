@@ -105,3 +105,10 @@ pub fn hexdump(buf: []const u8, target: usize, opt: HexdumpOptions) void {
         std.debug.print(Colour.Reset ++ "\n", .{});
     }
 }
+
+pub fn waitForUserInput() void {
+    std.debug.print("\n << Press ENTER to continue >>", .{});
+    defer std.debug.print("\r                                ", .{});
+    var buf: [16]u8 = undefined;
+    _ = std.io.getStdIn().reader().read(&buf) catch {};
+}

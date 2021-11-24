@@ -24,6 +24,25 @@ const InstructionType = enum {
     BlockDataTransfer,
     SingleDataSwap,
     SoftwareInterrupt,
+    ThumbMoveShifted,
+    ThumbAddSub,
+    ThumbAluImmediate,
+    ThumbAluReg,
+    ThumbHiRegOperationsBranchExchange,
+    ThumbPcRelativeLoad,
+    ThumbLoadStoreWithRegOffset,
+    ThumbLoadStoreSignExt,
+    ThumbStackLoadStopImmediateOffset,
+    ThumbLoadStoreHalfword,
+    ThumbStackPtrRelativeLoadStore,
+    ThumbLoadAddr,
+    ThumbAddOffsetToStackPtr,
+    ThumbPushPopReg,
+    ThumbLoadStoreMultiple,
+    ThumbBranchConditional,
+    ThumbSoftwareInterrupt,
+    ThumbBranchUnconditional,
+    ThumbBranchLongWithLink,
     Unknown,
 };
 
@@ -168,9 +187,16 @@ external_work_ram: [0x40000]u8 = std.mem.zeroes([0x40000]u8),
 internal_work_ram: [0x8000]u8 = std.mem.zeroes([0x8000]u8),
 game_pak: []const u8 = undefined,
 
-fn readU32(mem: []const u8, offset: u32) u32 {
-    return mem[offset] | @as(u32, mem[offset + 1]) << 8 | @as(u32, mem[offset + 2]) << 16 | @as(u32, mem[offset + 3]) << 24;
-    //     return @ptrCast(*const u32, @alignCast(4, &mem.ptr[offset])).*;
+fn readU32(mem: []const u8, offset: u32) !u32 {
+    if (mem.len < offset + 2)
+        return error.BadAddress;
+
+    var result: u32 = mem[offset] | @as(u32, mem[offset + 1]) << 8;
+
+    if (mem.len < offset + 4)
+        return result;
+
+    return result | @as(u32, mem[offset + 2]) << 16 | @as(u32, mem[offset + 3]) << 24;
 }
 
 fn getBufForAddress(self: Cpu, addr: u32) ?[]const u8 {
@@ -193,7 +219,7 @@ fn getMutableBufForAddress(self: *Cpu, addr: u32) ?[]u8 {
 
 pub fn read(self: Cpu, addr: u32) !u32 {
     return switch (addr >> 24) {
-        0x00, 0x02, 0x03, 0x08 => readU32(self.getBufForAddress(addr).?, addr & 0x00FF_FFFF),
+        0x00, 0x02, 0x03, 0x08 => try readU32(self.getBufForAddress(addr).?, addr & 0x00FF_FFFF),
         // 0x0A => readU32(self.game_pak, addr - 0x0A00_0000),
         // 0x0C => readU32(self.game_pak, addr - 0x0C00_0000),
         else => {
@@ -225,7 +251,10 @@ pub fn write(self: *Cpu, addr: u32, value: u32) void {
 }
 
 pub fn getNextInstruction(self: Cpu) !u32 {
-    return self.read(self.reg[PC]);
+    if (self.cpsr.t)
+        return (try self.read(self.reg[PC])) & 0x0000_FFFF
+    else
+        return try self.read(self.reg[PC]);
 }
 
 pub fn checkCondition(self: Cpu, instr: u32) bool {
@@ -258,75 +287,150 @@ pub fn checkCondition(self: Cpu, instr: u32) bool {
 
 pub fn decode(self: Cpu, instr: u32) InstructionType {
     return if (self.cpsr.t)
-        decodeThumb(@intCast(u16, instr & 0x0000_FFFF))
+        decodeThumb(@intCast(u16, instr))
     else
         decodeArm(instr);
 }
 
 fn decodeThumb(instr: u16) InstructionType {
-    _ = instr;
+    // 5.2 Add/subtract
+    if (instr >> 11 == 0b00011)
+        return .ThumbAddSub;
+
+    // 5.1 Move shifted register
+    if (instr >> 13 == 0b000)
+        return .ThumbMoveShifted;
+
+    // 5.3 Move/compare/add/subtract immediate
+    if (instr >> 13 == 0b001)
+        return .ThumbAluImmediate;
+
+    // 5.4 ALU operations
+    if (instr >> 10 == 0b010000)
+        return .ThumbAluReg;
+
+    // 5.5 Hi register operations/branch exchange
+    if (instr >> 10 == 0b010001)
+        return .ThumbHiRegOperationsBranchExchange;
+
+    // 5.6 PC-relative load
+    if (instr >> 11 == 0b01001)
+        return .ThumbPcRelativeLoad;
+
+    // 5.7 Load/store with register offset
+    if ((instr >> 9) & 0b1111001 == 0b0101000)
+        return .ThumbLoadStoreWithRegOffset;
+
+    // 5.8 Load/store with sign-extended byte/halfword
+    if ((instr >> 9) & 0b1111001 == 0b0101001)
+        return .ThumbLoadStoreSignExt;
+
+    // 5.9 Load/store with immediate offset
+    if (instr >> 13 == 0b011)
+        return .ThumbStackLoadStopImmediateOffset;
+
+    // 5.10 Load/store halfword
+    if (instr >> 12 == 0b1000)
+        return .ThumbLoadStoreHalfword;
+
+    // 5.11 SP-relative load/store
+    if (instr >> 12 == 0b1001)
+        return .ThumbStackPtrRelativeLoadStore;
+
+    // 5.12 Load address
+    if (instr >> 12 == 0b1010)
+        return .ThumbLoadAddr;
+
+    // 5.13 Add offset to stack pointer
+    if ((instr >> 10) & 0b111101 == 0b101100)
+        return .ThumbAddOffsetToStackPtr;
+
+    // 5.14 Push/pop registers
+    if ((instr >> 10) & 0b111101 == 0b101101)
+        return .ThumbPushPopReg;
+
+    // 5.15 Multiple load/store
+    if (instr >> 12 == 0b1100)
+        return .ThumbLoadStoreMultiple;
+
+    // 5.17 Software Interrupt
+    if (instr >> 8 == 0b11011111)
+        return .ThumbSoftwareInterrupt;
+
+    // 5.16 Conditional branch
+    if (instr >> 12 == 0b1101)
+        return .ThumbBranchConditional;
+
+    // 5.18 Unconditional branch
+    if (instr >> 12 == 0b1110)
+        return .ThumbBranchUnconditional;
+
+    // 5.19 Long branch with link
+    if (instr >> 12 == 0b1111)
+        return .ThumbBranchLongWithLink;
+
     return .Unknown;
 }
 
 fn decodeArm(instr: u32) InstructionType {
     // 4.3 Branch and Exchange (BX)
     // swaps between THUMB and ARM instruction sets
-    if ((instr & 0x0fff_fff0) == 0x012f_ff10)
+    if (instr & 0x0fff_fff0 == 0x012f_ff10)
         return .BranchExchange;
 
     // 4.4 Branch and Branch with Link (B, BL)
-    if ((instr & 0x0e00_0000) == 0x0a00_0000)
+    if (instr & 0x0e00_0000 == 0x0a00_0000)
         return .Branch;
 
     // 4.5 Data Processing
     // Simple ALU ops
-    if ((instr & 0x0c00_0000) == 0x0000_0000)
+    if (instr & 0x0c00_0000 == 0x0000_0000)
         return .DataProcessing;
 
     // 4.6 PSR Transfer (MRS, MSR)
     // allows access to the CPSR and SPSR registers
     //   MRS (transfer PSR contents to a register)
-    if ((instr & 0x0fbf_0fff) == 0x010f_0000)
+    if (instr & 0x0fbf_0fff == 0x010f_0000)
         return .MoveFromStatus;
     //   MSR (transfer register contents to PSR)
-    if ((instr & 0x0fbf_fff0) == 0x0129_f000)
+    if (instr & 0x0fbf_fff0 == 0x0129_f000)
         return .MoveToStatus;
     //   MSR (transfer register contents or immdiate value to PSR flag bits only)
-    if ((instr & 0x0dbf_f000) == 0x0128_f000)
+    if (instr & 0x0dbf_f000 == 0x0128_f000)
         return .MoveToFlags;
 
     // 4.7 Multiply and Multiply-Accumulate (MUL, MLA)
-    if ((instr & 0x0fc0_00f0) == 0x0000_0090)
+    if (instr & 0x0fc0_00f0 == 0x0000_0090)
         return .Multiply;
 
     // 4.8 Multiply Long and Multiply-Accumulate Long (MULL,MLAL)
-    if ((instr & 0x0f80_00f0) == 0x0080_0090)
+    if (instr & 0x0f80_00f0 == 0x0080_0090)
         return .MultiplyLong;
 
     // 4.9 Single Data Transfer (LDR, STR)
     // used to load/store single bytes/words of data
-    if ((instr & 0x0c00_0000) == 0x0400_0000)
+    if (instr & 0x0c00_0000 == 0x0400_0000)
         return .SingleDataTransfer;
 
     // 4.10 Halfword and Signed Data Transfer (LDRH/STRH/LDRSB/LDRSH)
-    if ((instr & 0x0e40_0F90) == 0x0000_0090)
+    if (instr & 0x0e40_0F90 == 0x0000_0090)
         return .HalfwordDataTransferRegOffset;
-    if ((instr & 0x0e40_0090) == 0x0040_0090)
+    if (instr & 0x0e40_0090 == 0x0040_0090)
         return .HalfwordDataTransferImmediateOffset;
 
     // 4.11 Block Data Transfer (LDM, STM)
     // loads or stores any subset of registers
-    if ((instr & 0x0e00_0000) == 0x0800_0000)
+    if (instr & 0x0e00_0000 == 0x0800_0000)
         return .BlockDataTransfer;
 
     // 4.12 Single Data Swap (SWP)
     // swaps a byte/word between a register and external memory
-    if ((instr & 0x0fb0_0ff0) == 0x0100_0090)
+    if (instr & 0x0fb0_0ff0 == 0x0100_0090)
         return .SingleDataSwap;
 
     // 4.13 Software Interrupt (SWI)
     // used to enter supervisor mode(?) in a controlled manner
-    if ((instr & 0x0f00_0000) == 0x0f00_0000)
+    if (instr & 0x0f00_0000 == 0x0f00_0000)
         return .SoftwareInterrupt;
 
     // std.log.crit("unknown instruction: {X:0>8}", .{instr});
@@ -342,7 +446,7 @@ pub fn branch(self: *Cpu, instr: u32) void {
 
     const curr_pos = @intCast(i64, self.reg[PC]);
     const offset = @bitCast(i32, (instr & 0xFF_FFFF) << 2);
-    self.reg[PC] = @intCast(u32, curr_pos + offset);
+    self.reg[PC] = @intCast(u32, curr_pos + offset + 8);
 
     std.debug.print("            jumping by 0x{X}\n", .{offset});
 }
@@ -358,7 +462,7 @@ pub fn branchExchange(self: *Cpu, instr: u32) void {
     });
 
     self.cpsr.t = toThumb;
-    self.incrementProgramCounter();
+    self.reg[PC] += 4;
 }
 
 pub fn blockDataTransfer(self: *Cpu, instr: u32) void {
@@ -375,7 +479,7 @@ pub fn blockDataTransfer(self: *Cpu, instr: u32) void {
 
     std.debug.print("            {}\n", .{@bitCast(BdtInstr, instr)});
 
-    self.incrementProgramCounter();
+    self.reg[PC] += 4;
 }
 
 pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
@@ -397,17 +501,20 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
 
     // unsure if this is correct
     if (sdt.index == .Pre)
-        self.incrementProgramCounter();
+        self.reg[PC] += 4;
 
     const base_value = self.reg[sdt.base_reg];
     const offset = if (sdt.offset_type == .Immediate)
         sdt.offset
     else
         self.shift(self.reg[sdt.offset & 0x0F], @intCast(u8, sdt.offset >> 4), false);
-    const mem_addr = if (sdt.dir == .Up)
+    var mem_addr = if (sdt.dir == .Up)
         base_value + offset
     else
         base_value - offset;
+
+    if (sdt.base_reg == PC)
+        mem_addr += 4;
 
     std.debug.print("            {} at mem_addr=0x{X} (base_val=0x{X}, offset=0x{X})\n", .{
         sdt.type,
@@ -447,7 +554,7 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
     }
 
     if (sdt.index == .Post)
-        self.incrementProgramCounter();
+        self.reg[PC] += 4;
 }
 
 fn shift(self: *Cpu, operand: u32, shift_field: u8, allow_reg_shift: bool) u32 {
@@ -472,7 +579,7 @@ fn shift(self: *Cpu, operand: u32, shift_field: u8, allow_reg_shift: bool) u32 {
         .LogicalLeft => std.math.shl(u32, operand, val),
         .LogicalRight => std.math.shr(u32, operand, val),
         // unsure if this is right...
-        .ArithmeticRight => @intCast(u32, std.math.shr(i32, @intCast(i32, operand), val)),
+        .ArithmeticRight => @bitCast(u32, std.math.shr(i32, @bitCast(i32, operand), val)),
         .RotateRight => std.math.rotr(u32, operand, val),
     };
 }
@@ -536,6 +643,8 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
     const opcode = @intToEnum(Opcode, (instr & 0x01E0_0000) >> 21);
 
     var op1: u32 = self.reg[reg1];
+    if (reg1 == PC) op1 += 8;
+
     var op2: u32 = undefined;
     if (immediate) {
         const imm_val = @intCast(u8, instr & 0xFF);
@@ -564,7 +673,9 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
         const reg2 = instr & 0x0F;
         const shift_field = @intCast(u8, (instr & 0x0FF0) >> 4);
 
-        op2 = self.shift(self.reg[reg2], shift_field, true);
+        var reg_val = self.reg[reg2];
+        if (reg2 == PC) reg_val += 8;
+        op2 = self.shift(reg_val, shift_field, true);
 
         std.debug.print(
             \\            {}:
@@ -623,7 +734,57 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
         self.reg[dest_reg] = result;
     }
 
-    self.incrementProgramCounter();
+    self.reg[PC] += 4;
+}
+
+pub fn thumbBranchUnconditional(self: *Cpu, instr: u16) void {
+    const unsigned_offset = @intCast(u12, (instr & 0x07FF) << 1);
+    const offset = @bitCast(i12, unsigned_offset);
+
+    std.debug.print("            jumping by 0x{X}\n", .{offset});
+
+    const new_pos = @intCast(i32, self.reg[PC]) + offset;
+    self.reg[PC] = @intCast(u32, new_pos);
+}
+
+pub fn thumbPcRelativeLoad(self: *Cpu, instr: u16) void {
+    const offset = (instr & 0xFF) << 2;
+    const dest_reg = instr >> 8 & 0b111;
+
+    const val = self.read((self.reg[PC] & 0xFFFF_FFFE) + offset + 4) catch unreachable;
+    std.debug.print("            reg{} <- 0x{X} (offset = 0x{X})\n", .{ dest_reg, val, offset });
+    self.reg[dest_reg] = val;
+
+    self.reg[PC] += 2;
+}
+
+pub fn thumbMoveShifted(self: *Cpu, instr: u16) void {
+    const Op = enum(u2) {
+        LogicalLeft,
+        LogicalRight,
+        ArithmeticRight,
+    };
+
+    const MoveShiftedInstr = packed struct {
+        dest: u3,
+        source: u3,
+        offset: u5,
+        op: Op,
+        _: u3,
+    };
+
+    const msi = @bitCast(MoveShiftedInstr, instr);
+    std.debug.print("            {}\n", .{msi});
+
+    const result = switch (msi.op) {
+        .LogicalLeft => std.math.shl(u32, self.reg[msi.source], msi.offset),
+        .LogicalRight => std.math.shr(u32, self.reg[msi.source], msi.offset),
+        .ArithmeticRight => @bitCast(u32, std.math.shr(i32, @bitCast(i32, self.reg[msi.source]), msi.offset)),
+    };
+    std.debug.print("            reg{} <- 0x{X}\n", .{ msi.dest, result });
+    self.reg[msi.dest] = result;
+
+    self.reg[PC] += 2;
 }
 
 pub fn dumpRegisters(self: *Cpu) void {
