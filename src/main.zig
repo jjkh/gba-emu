@@ -62,10 +62,10 @@ pub fn main() anyerror!void {
             .SingleDataTransfer => cpu.singleDataTransfer(instr) catch break,
             .BlockDataTransfer => cpu.blockDataTransfer(instr),
             .DataProcessing => cpu.dataProcessing(instr),
-            .ThumbBranchUnconditional => cpu.thumbBranchUnconditional(@intCast(u16, instr)),
-            .ThumbPcRelativeLoad => cpu.thumbPcRelativeLoad(@intCast(u16, instr)),
-            .ThumbMoveShifted => cpu.thumbMoveShifted(@intCast(u16, instr)),
-            // .ThumbBranchLongWithLink => cpu.thumbBranchLongWithLink(@intCast(u16, instr)),
+            .ThumbBranchUnconditional => cpu.thumbBranchUnconditional(@truncate(u16, instr)),
+            .ThumbPcRelativeLoad => cpu.thumbPcRelativeLoad(@truncate(u16, instr)),
+            .ThumbMoveShifted => cpu.thumbMoveShifted(@truncate(u16, instr)),
+            // .ThumbBranchLongWithLink => cpu.thumbBranchLongWithLink(@truncate(u16, instr)),
             else => {
                 waitForUserInput();
                 if (is_thumb)

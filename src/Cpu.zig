@@ -251,10 +251,7 @@ pub fn write(self: *Cpu, addr: u32, value: u32) void {
 }
 
 pub fn getNextInstruction(self: Cpu) !u32 {
-    if (self.cpsr.t)
-        return (try self.read(self.reg[PC])) & 0x0000_FFFF
-    else
-        return try self.read(self.reg[PC]);
+    return try self.read(self.reg[PC]);
 }
 
 pub fn checkCondition(self: Cpu, instr: u32) bool {
@@ -287,7 +284,7 @@ pub fn checkCondition(self: Cpu, instr: u32) bool {
 
 pub fn decode(self: Cpu, instr: u32) InstructionType {
     return if (self.cpsr.t)
-        decodeThumb(@intCast(u16, instr))
+        decodeThumb(@truncate(u16, instr))
     else
         decodeArm(instr);
 }
@@ -557,6 +554,26 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
         self.reg[PC] += 4;
 }
 
+
+const ShiftType = enum(u2) {
+    LogicalLeft,
+    LogicalRight,
+    ArithmeticRight,
+    RotateRight,
+};
+
+// fn shift(self: *Cpu, value: u32, shift_amount: u32, shift_type: ShiftType) u32 {
+//     return switch (shift_type) {
+//         .LogicalLeft => {
+//             std.math.shl(u32, operand, val),
+//         }
+//         .LogicalRight => std.math.shr(u32, operand, val),
+//         // unsure if this is right...
+//         .ArithmeticRight => @bitCast(u32, std.math.shr(i32, @bitCast(i32, operand), val)),
+//         .RotateRight => std.math.rotr(u32, operand, val),
+//     };
+// }
+
 fn shift(self: *Cpu, operand: u32, shift_field: u8, allow_reg_shift: bool) u32 {
     // TODO: follow "Register specified shift amount" more correctly
     const val = if (allow_reg_shift and shift_field & 0x01 == 0x01)
@@ -566,16 +583,10 @@ fn shift(self: *Cpu, operand: u32, shift_field: u8, allow_reg_shift: bool) u32 {
         // immediate shift amount
         shift_field >> 3;
 
-    const ShiftType = enum(u2) {
-        LogicalLeft,
-        LogicalRight,
-        ArithmeticRight,
-        RotateRight,
-    };
     const shift_type = @intToEnum(ShiftType, (shift_field & 0b110) >> 1);
 
     // TODO: set the carry output bit
-    return switch (shift_type) {
+        return switch (shift_type) {
         .LogicalLeft => std.math.shl(u32, operand, val),
         .LogicalRight => std.math.shr(u32, operand, val),
         // unsure if this is right...
@@ -647,8 +658,8 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
 
     var op2: u32 = undefined;
     if (immediate) {
-        const imm_val = @intCast(u8, instr & 0xFF);
-        const rotate = (instr & 0x0F00) >> 8;
+        const imm_val = @truncate(u8, instr);
+        const rotate = instr >> 8 & 0x0F;
 
         op2 = std.math.rotr(u32, imm_val, rotate * 2);
         std.debug.print(
@@ -671,7 +682,7 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
     } else {
         // 4.5.2 Shifts
         const reg2 = instr & 0x0F;
-        const shift_field = @intCast(u8, (instr & 0x0FF0) >> 4);
+        const shift_field = @truncate(u8, instr >> 4);
 
         var reg_val = self.reg[reg2];
         if (reg2 == PC) reg_val += 8;
@@ -738,7 +749,7 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
 }
 
 pub fn thumbBranchUnconditional(self: *Cpu, instr: u16) void {
-    const unsigned_offset = @intCast(u12, (instr & 0x07FF) << 1);
+    const unsigned_offset = @truncate(u12, instr << 1);
     const offset = @bitCast(i12, unsigned_offset);
 
     std.debug.print("            jumping by 0x{X}\n", .{offset});
