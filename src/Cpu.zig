@@ -504,7 +504,7 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
     const offset = if (sdt.offset_type == .Immediate)
         sdt.offset
     else
-        self.shift(self.reg[sdt.offset & 0x0F], @intCast(u8, sdt.offset >> 4), false);
+        self.shiftWithField(self.reg[sdt.offset & 0x0F], @intCast(u8, sdt.offset >> 4), false);
     var mem_addr = if (sdt.dir == .Up)
         base_value + offset
     else
@@ -562,21 +562,47 @@ const ShiftType = enum(u2) {
     RotateRight,
 };
 
-// fn shift(self: *Cpu, value: u32, shift_amount: u32, shift_type: ShiftType) u32 {
-//     return switch (shift_type) {
-//         .LogicalLeft => {
-//             std.math.shl(u32, operand, val),
-//         }
-//         .LogicalRight => std.math.shr(u32, operand, val),
-//         // unsure if this is right...
-//         .ArithmeticRight => @bitCast(u32, std.math.shr(i32, @bitCast(i32, operand), val)),
-//         .RotateRight => std.math.rotr(u32, operand, val),
-//     };
-// }
+fn shift(self: *Cpu, value: u32, shift_amount: u5, shift_type: ShiftType) u32 {
+    switch (shift_type) {
+        .LogicalLeft => {
+            if (shift_amount > 0)
+                // TODO: only when ALU is in "logical class" (4-12)
+                self.cpsr.c = (value >> shift_amount +% 31) == 1;
 
-fn shift(self: *Cpu, operand: u32, shift_field: u8, allow_reg_shift: bool) u32 {
+            return std.math.shl(u32, value, shift_amount);
+        },
+        .LogicalRight => {
+            // TODO: only when ALU is in "logical class" (4-12)
+            self.cpsr.c = (value >> shift_amount - 1) == 1;
+
+            return value >> shift_amount;
+        },
+        .ArithmeticRight => {
+            // TODO: only when ALU is in "logical class" (4-12)
+            self.cpsr.c = (value >> shift_amount - 1) == 1;
+
+            // first bitCast to i32 to get sign extension of shift
+            return @bitCast(u32, @bitCast(i32, value) >> shift_amount);
+        },
+        .RotateRight => {
+            // TODO: rotate right extended (RRX) (4-14)
+            // if (shift_amount == 0)
+            //     std.math.rotr(u33, value, shift_amount);
+
+            const output = std.math.rotr(u32, value, @intCast(u6, shift_amount));
+            
+            // TODO: only when ALU is in "logical class" (4-12)
+            self.cpsr.c = output >> 31 == 1;
+
+            return output;
+        }
+    }
+}
+
+fn shiftWithField(self: *Cpu, value: u32, shift_field: u8, allow_reg_shift: bool) u32 {
+
     // TODO: follow "Register specified shift amount" more correctly
-    const val = if (allow_reg_shift and shift_field & 0x01 == 0x01)
+    const shift_amount = if (allow_reg_shift and shift_field & 0x01 == 0x01)
         // shift value stored in least significant byte of a register
         self.reg[shift_field >> 4] & 0x0F
     else
@@ -586,13 +612,7 @@ fn shift(self: *Cpu, operand: u32, shift_field: u8, allow_reg_shift: bool) u32 {
     const shift_type = @intToEnum(ShiftType, (shift_field & 0b110) >> 1);
 
     // TODO: set the carry output bit
-        return switch (shift_type) {
-        .LogicalLeft => std.math.shl(u32, operand, val),
-        .LogicalRight => std.math.shr(u32, operand, val),
-        // unsure if this is right...
-        .ArithmeticRight => @bitCast(u32, std.math.shr(i32, @bitCast(i32, operand), val)),
-        .RotateRight => std.math.rotr(u32, operand, val),
-    };
+    return self.shift(value, @intCast(u5, shift_amount), shift_type);
 }
 
 pub fn dataProcessing(self: *Cpu, instr: u32) void {
@@ -686,7 +706,7 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
 
         var reg_val = self.reg[reg2];
         if (reg2 == PC) reg_val += 8;
-        op2 = self.shift(reg_val, shift_field, true);
+        op2 = self.shiftWithField(reg_val, shift_field, true);
 
         std.debug.print(
             \\            {}:
@@ -771,9 +791,9 @@ pub fn thumbPcRelativeLoad(self: *Cpu, instr: u16) void {
 
 pub fn thumbMoveShifted(self: *Cpu, instr: u16) void {
     const Op = enum(u2) {
-        LogicalLeft,
-        LogicalRight,
-        ArithmeticRight,
+        LSL,
+        LSR,
+        ASR,
     };
 
     const MoveShiftedInstr = packed struct {
@@ -787,11 +807,13 @@ pub fn thumbMoveShifted(self: *Cpu, instr: u16) void {
     const msi = @bitCast(MoveShiftedInstr, instr);
     std.debug.print("            {}\n", .{msi});
 
-    const result = switch (msi.op) {
-        .LogicalLeft => std.math.shl(u32, self.reg[msi.source], msi.offset),
-        .LogicalRight => std.math.shr(u32, self.reg[msi.source], msi.offset),
-        .ArithmeticRight => @bitCast(u32, std.math.shr(i32, @bitCast(i32, self.reg[msi.source]), msi.offset)),
+    const shift_type: ShiftType = switch (msi.op) {
+        .LSL => .LogicalLeft,
+        .LSR => .LogicalRight,
+        .ASR => .ArithmeticRight,
     };
+    const result = self.shift(self.reg[msi.source], msi.offset, shift_type);
+    
     std.debug.print("            reg{} <- 0x{X}\n", .{ msi.dest, result });
     self.reg[msi.dest] = result;
 
