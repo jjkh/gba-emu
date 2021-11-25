@@ -31,44 +31,51 @@ pub fn main() anyerror!void {
 
     var prog_counter: usize = 0;
     while (true) : (prog_counter += 1) {
-        // waitForUserInput();
-
-        var instr: u32 = cpu.getNextInstruction() catch break;
+        const instr = cpu.getNextInstruction() catch break;
+        const instr_type = cpu.decode(instr);
         cpu.dumpRegisters();
-        const is_thumb = cpu.cpsr.t;
-        const should_run = cpu.checkCondition(instr);
+        const should_run = cpu.shouldExecuteInstruction(instr);
         {
             if (!should_run) std.debug.print(TF.Dim, .{});
             std.debug.print(
                 "{X:0>8}  {X:0>8}\n          ",
                 .{ cpu.reg[15], instr },
             );
-            if (is_thumb)
-                std.debug.print("\r    {b:0>16}\n          ", .{instr})
-            else
-                std.debug.print("\r    {b:0>32}\n          ", .{instr});
+            // if (instr_type.isThumb())
+            //     std.debug.print("\r    {b:0>16}\n          ", .{instr})
+            // else
+            //     std.debug.print("\r    {b:0>32}\n          ", .{instr});
 
             if (should_run) std.debug.print(TF.BrightCyan, .{});
-            std.debug.print("{}" ++ TF.Reset ++ "\n", .{cpu.decode(instr)});
+            std.debug.print("{}" ++ TF.Reset ++ "\n", .{instr_type});
         }
+
+        if (cpu.reg[15] >= 0x08000188)
+            waitForUserInput();
+
         if (!should_run) {
             cpu.reg[15] += 4;
             continue;
         }
 
-        switch (cpu.decode(instr)) {
+        switch (instr_type) {
             .Branch => cpu.branch(instr),
             .BranchExchange => cpu.branchExchange(instr),
             .SingleDataTransfer => cpu.singleDataTransfer(instr) catch break,
             .BlockDataTransfer => cpu.blockDataTransfer(instr),
             .DataProcessing => cpu.dataProcessing(instr),
             .ThumbBranchUnconditional => cpu.thumbBranchUnconditional(@truncate(u16, instr)),
+            .ThumbBranchConditional => cpu.thumbBranchConditional(@truncate(u16, instr)),
+            .ThumbBranchLongWithLink => cpu.thumbBranchLongWithLink(instr),
+            .ThumbHiRegOperationsBranchExchange => cpu.thumbHiRegOperationsBranchExchange(@truncate(u16, instr)),
             .ThumbPcRelativeLoad => cpu.thumbPcRelativeLoad(@truncate(u16, instr)),
             .ThumbMoveShifted => cpu.thumbMoveShifted(@truncate(u16, instr)),
-            // .ThumbBranchLongWithLink => cpu.thumbBranchLongWithLink(@truncate(u16, instr)),
+            .ThumbAluImmediate => cpu.thumbAluImmediate(@truncate(u16, instr)),
+            .ThumbAluReg => cpu.thumbAluReg(@truncate(u16, instr)),
+            .ThumbAddSub => cpu.thumbAddSub(@truncate(u16, instr)),
             else => {
-                waitForUserInput();
-                if (is_thumb)
+                // waitForUserInput();
+                if (instr_type.isThumb())
                     cpu.reg[15] += 2
                 else
                     cpu.reg[15] += 4;

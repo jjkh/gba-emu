@@ -44,6 +44,10 @@ const InstructionType = enum {
     ThumbBranchUnconditional,
     ThumbBranchLongWithLink,
     Unknown,
+
+    pub fn isThumb(instr: @This()) bool {
+        return std.mem.startsWith(u8, @tagName(instr), "Thumb");
+    }
 };
 
 // 3.8 The Program Status Registers
@@ -254,14 +258,17 @@ pub fn getNextInstruction(self: Cpu) !u32 {
     return try self.read(self.reg[PC]);
 }
 
-pub fn checkCondition(self: Cpu, instr: u32) bool {
+pub fn shouldExecuteInstruction(self: Cpu, instr: u32) bool {
     // THUMB instructions do not have the condition field at the start of each opcode
     if (self.cpsr.t)
         return true;
 
     const condition = @intToEnum(Condition, instr >> 28);
     std.debug.print(TF.Italic ++ TF.Underline ++ "{}" ++ TF.Reset ++ "\n", .{condition});
+    return self.checkCondition(condition);
+}
 
+pub fn checkCondition(self: Cpu, condition: Condition) bool {
     return switch (condition) {
         .Equal => self.cpsr.z,
         .NotEqual => !self.cpsr.z,
@@ -522,8 +529,19 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
 
     if (sdt.type == .Load) {
         if (sdt.quantity == .Byte) {
+            std.debug.print("            reg{} <- 0x{X:0>2} (byte@0x{X:0>8})\n", .{
+                sdt.src_dst_reg,
+                (try self.read(mem_addr)) & 0xFF,
+                mem_addr,
+            });
+
             self.reg[sdt.src_dst_reg] = (try self.read(mem_addr)) & 0xFF;
         } else {
+            std.debug.print(
+                "            reg{} <- 0x{X:0>8} (word@0x{X:0>8})\n",
+                .{ sdt.src_dst_reg, try self.read(mem_addr), mem_addr },
+            );
+
             // TODO: non-word-aligned loads
             self.reg[sdt.src_dst_reg] = try self.read(mem_addr);
         }
@@ -533,27 +551,34 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
             const byte: u32 = self.reg[sdt.src_dst_reg] & 0xFF;
             const word = byte | byte << 8 | byte << 16 | byte << 24;
 
+            std.debug.print(
+                "            0x{X:0>8} <- {X:0>8} (byte@reg{})\n",
+                .{ mem_addr, word, sdt.src_dst_reg },
+            );
             self.write(mem_addr, word);
         } else {
+            std.debug.print(
+                "            0x{X:0>8} <- {X:0>8} (word@reg{})\n",
+                .{ mem_addr, self.reg[sdt.src_dst_reg], sdt.src_dst_reg },
+            );
             self.write(mem_addr, self.reg[sdt.src_dst_reg]);
         }
     }
-    if (self.getBufForAddress(mem_addr)) |buf| {
-        const addr = mem_addr & 0x00FF_FFFF;
+    // if (self.getBufForAddress(mem_addr)) |buf| {
+    //     const addr = mem_addr & 0x00FF_FFFF;
 
-        std.debug.print(" \n", .{});
-        hexdump(buf, addr, .{
-            .line_length = 16,
-            .context = 2,
-            .offset = mem_addr & 0xFF00_0000,
-            .highlight = if (sdt.quantity == .Word) .{ .start = addr, .end = addr + 4 } else null,
-        });
-    }
+    //     std.debug.print(" \n", .{});
+    //     hexdump(buf, addr, .{
+    //         .line_length = 16,
+    //         .context = 2,
+    //         .offset = mem_addr & 0xFF00_0000,
+    //         .highlight = if (sdt.quantity == .Word) .{ .start = addr, .end = addr + 4 } else null,
+    //     });
+    // }
 
     if (sdt.index == .Post)
         self.reg[PC] += 4;
 }
-
 
 const ShiftType = enum(u2) {
     LogicalLeft,
@@ -567,7 +592,7 @@ fn shift(self: *Cpu, value: u32, shift_amount: u5, shift_type: ShiftType) u32 {
         .LogicalLeft => {
             if (shift_amount > 0)
                 // TODO: only when ALU is in "logical class" (4-12)
-                self.cpsr.c = (value >> shift_amount +% 31) == 1;
+                self.cpsr.c = (value >> @intCast(u5, 32 - @as(u6, shift_amount))) == 1;
 
             return std.math.shl(u32, value, shift_amount);
         },
@@ -590,12 +615,12 @@ fn shift(self: *Cpu, value: u32, shift_amount: u5, shift_type: ShiftType) u32 {
             //     std.math.rotr(u33, value, shift_amount);
 
             const output = std.math.rotr(u32, value, @intCast(u6, shift_amount));
-            
+
             // TODO: only when ALU is in "logical class" (4-12)
             self.cpsr.c = output >> 31 == 1;
 
             return output;
-        }
+        },
     }
 }
 
@@ -769,12 +794,47 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
 }
 
 pub fn thumbBranchUnconditional(self: *Cpu, instr: u16) void {
-    const unsigned_offset = @truncate(u12, instr << 1);
-    const offset = @bitCast(i12, unsigned_offset);
+    const offset = @truncate(i12, @intCast(i32, instr << 1));
 
     std.debug.print("            jumping by 0x{X}\n", .{offset});
 
     const new_pos = @intCast(i32, self.reg[PC]) + offset;
+    self.reg[PC] = @intCast(u32, new_pos);
+}
+
+pub fn thumbBranchConditional(self: *Cpu, instr: u16) void {
+    const condition = @intToEnum(Condition, @truncate(u4, instr >> 8));
+
+    if (!self.checkCondition(condition)) {
+        std.debug.print("            not jumping!\n", .{});
+        self.reg[PC] += 2;
+        return;
+    }
+    const offset = @truncate(i9, @intCast(i32, instr << 1));
+    std.debug.print("            jumping by 0x{X}\n", .{offset});
+
+    const new_pos = @intCast(i32, self.reg[PC]) + offset + 4;
+    self.reg[PC] = @intCast(u32, new_pos);
+}
+
+// NOTE: takes a 4 byte instruction
+pub fn thumbBranchLongWithLink(self: *Cpu, instr: u32) void {
+    const LongBranchInstr = packed struct {
+        offset: u11,
+        offset_part: enum(u1) { High, Low },
+        _: u4,
+    };
+
+    const lbi1 = @bitCast(LongBranchInstr, @truncate(u16, instr));
+    const lbi2 = @bitCast(LongBranchInstr, @truncate(u16, instr >> 16));
+    std.debug.print("            {}\n", .{lbi1});
+    std.debug.print("            {}\n", .{lbi2});
+
+    const unsigned_offset = @as(u32, lbi1.offset) << 12 | @as(u32, lbi2.offset) << 1;
+    const offset = @bitCast(i23, @truncate(u23, unsigned_offset));
+    std.debug.print("            jumping by 0x{X}\n", .{offset});
+
+    const new_pos = @intCast(i32, self.reg[PC]) + offset + 4;
     self.reg[PC] = @intCast(u32, new_pos);
 }
 
@@ -813,9 +873,191 @@ pub fn thumbMoveShifted(self: *Cpu, instr: u16) void {
         .ASR => .ArithmeticRight,
     };
     const result = self.shift(self.reg[msi.source], msi.offset, shift_type);
-    
+
     std.debug.print("            reg{} <- 0x{X}\n", .{ msi.dest, result });
     self.reg[msi.dest] = result;
+
+    self.cpsr.z = result == 0;
+    self.cpsr.n = result >> 31 == 1;
+
+    self.reg[PC] += 2;
+}
+
+pub fn thumbHiRegOperationsBranchExchange(self: *Cpu, instr: u16) void {
+    const Op = enum(u2) {
+        Add,
+        Compare,
+        Move,
+        BranchExchange,
+    };
+
+    const HiRegOpInstr = packed struct {
+        dest_reg: u3,
+        source_reg: u3,
+        flag2: bool,
+        flag1: bool,
+        opcode: Op,
+        _: u6,
+    };
+
+    const hroi = @bitCast(HiRegOpInstr, instr);
+
+    std.debug.print("            {}\n", .{hroi});
+
+    const dest_reg = if (hroi.flag2) hroi.dest_reg else @as(u4, hroi.dest_reg) + 8;
+    const source_reg: u4 = if (hroi.flag1) hroi.source_reg else @as(u4, hroi.source_reg) + 8;
+
+    std.debug.print("            rd={}, rs={}\n", .{ dest_reg, source_reg });
+
+    switch (hroi.opcode) {
+        .Add => self.reg[dest_reg] += self.reg[source_reg],
+        .Compare => {
+            const result = self.reg[dest_reg] - self.reg[source_reg];
+            // TODO: other conditions
+            self.cpsr.z = result == 0;
+            self.cpsr.n = result >> 31 == 1;
+        },
+        .Move => self.reg[dest_reg] = self.reg[source_reg],
+        .BranchExchange => {
+            self.reg[PC] = self.reg[source_reg] & 0xFFFF_FFFE;
+            self.cpsr.t = self.reg[source_reg] >> 31 == 1;
+            return;
+        },
+    }
+
+    self.reg[PC] += 2;
+}
+
+pub fn thumbAluImmediate(self: *Cpu, instr: u16) void {
+    const Op = enum(u2) {
+        Move,
+        Compare,
+        Add,
+        Sub,
+    };
+
+    const AluImmInstr = packed struct {
+        imm: u8,
+        dest_reg: u3,
+        opcode: Op,
+        _: u3,
+    };
+
+    const aii = @bitCast(AluImmInstr, instr);
+    std.debug.print("            {}\n", .{aii});
+
+    const result = switch (aii.opcode) {
+        .Move => aii.imm,
+        .Compare, .Sub => self.reg[aii.dest_reg] - aii.imm,
+        .Add => self.reg[aii.dest_reg] - aii.imm,
+    };
+
+    self.cpsr.z = result == 0;
+    self.cpsr.n = result >> 31 == 1;
+
+    if (aii.opcode != .Compare) {
+        std.debug.print("            reg{} <- 0x{X:0>2}\n", .{ aii.dest_reg, result });
+        self.reg[aii.dest_reg] = result;
+    }
+
+    self.reg[PC] += 2;
+}
+
+pub fn thumbAluReg(self: *Cpu, instr: u16) void {
+    const Op = enum(u4) {
+        And,
+        Eor,
+        Lsl,
+        Lsr,
+        Asr,
+        Adc,
+        Sbc,
+        Ror,
+        Tst,
+        Neg,
+        Cmp,
+        Cmn,
+        Orr,
+        Mul,
+        Bic,
+        Mvn,
+
+        pub fn setDest(opcode: @This()) bool {
+            return switch (opcode) {
+                .Tst, .Cmp, .Cmn => false,
+                else => true,
+            };
+        }
+    };
+
+    const AluRegInstr = packed struct {
+        dest_reg: u3,
+        source_reg: u3,
+        opcode: Op,
+        _: u6,
+    };
+
+    const ari = @bitCast(AluRegInstr, instr);
+    std.debug.print("            {}\n", .{ari});
+
+    const op1 = self.reg[ari.dest_reg];
+    const op2 = self.reg[ari.source_reg];
+    std.debug.print("            op1=0x{X} op2=0x{X}\n", .{ op1, op2 });
+
+    const result = switch (ari.opcode) {
+        .And, .Tst => op1 & op2,
+        .Eor => op1 ^ op2,
+        .Lsl => self.shift(op1, @truncate(u5, op2), .LogicalLeft),
+        .Lsr => self.shift(op1, @truncate(u5, op2), .LogicalRight),
+        .Asr => self.shift(op1, @truncate(u5, op2), .ArithmeticRight),
+        .Adc => op1 + op2 + @boolToInt(self.cpsr.c),
+        .Sbc => op1 - op2 - @boolToInt(!self.cpsr.c),
+        .Ror => self.shift(op1, @truncate(u5, op2), .RotateRight),
+        .Neg => @bitCast(u32, -@bitCast(i32, op2)),
+        .Cmp => op1 - op2,
+        .Cmn => op1 + op2,
+        .Orr => op1 | op2,
+        .Mul => @truncate(u32, op1 * op2),
+        .Bic => op1 & ~op2,
+        .Mvn => ~op2,
+    };
+
+    self.cpsr.z = result == 0;
+    self.cpsr.n = result >> 31 == 1;
+
+    if (ari.opcode.setDest()) {
+        std.debug.print("            reg{} <- 0x{X:0>8}\n", .{ ari.dest_reg, result });
+        self.reg[ari.dest_reg] = result;
+    }
+
+    self.reg[PC] += 2;
+}
+
+pub fn thumbAddSub(self: *Cpu, instr: u16) void {
+    const AddSubInstr = packed struct {
+        dest_reg: u3,
+        op1_reg: u3,
+        op2_reg: u3,
+        opcode: enum(u1) { Add, Sub },
+        imm: bool,
+        _: u5,
+    };
+
+    const asi = @bitCast(AddSubInstr, instr);
+    std.debug.print("            {}\n", .{asi});
+
+    const op2_val = if (asi.imm) asi.op2_reg else self.reg[asi.op2_reg];
+
+    const result = switch (asi.opcode) {
+        .Add => self.reg[asi.op1_reg] + op2_val,
+        .Sub => self.reg[asi.op1_reg] - op2_val,
+    };
+
+    self.cpsr.z = result == 0;
+    self.cpsr.n = result >> 31 == 1;
+
+    std.debug.print("            reg{} <- 0x{X:0>8}\n", .{ asi.dest_reg, result });
+    self.reg[asi.dest_reg] = result;
 
     self.reg[PC] += 2;
 }
