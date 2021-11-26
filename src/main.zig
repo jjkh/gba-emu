@@ -1,15 +1,17 @@
 const std = @import("std");
 const Cpu = @import("Cpu.zig");
 
-const TF = @import("utility.zig").TextFormat;
-const hexdump = @import("utility.zig").hexdump;
-const waitForUserInput = @import("utility.zig").waitForUserInput;
+const Log = @import("Log.zig");
 
 // const input_file = @embedFile("../gba_bios.bin");
 const input_file = @embedFile("../tonc/first.gba");
 // const input_file = @embedFile("../template.gba");
 
 pub fn main() anyerror!void {
+    var log = Log.init();
+    defer log.flush();
+    // log.trace = true;
+
     // --- run from external ram ---
     // var cpu = Cpu{};
     // std.mem.copy(u8, &cpu.external_work_ram, input_file);
@@ -19,10 +21,10 @@ pub fn main() anyerror!void {
     // -----------------------------
 
     // --- run from gamepak rom ---
-    var cpu = Cpu{ .game_pak = input_file };
+    var cpu = Cpu{ .log = &log, .game_pak = input_file };
     // jump to game pak rom
     cpu.reg[15] = 0x800_0000;
-    hexdump(cpu.game_pak, 0x106, .{
+    log.hexdump(cpu.game_pak, 0x106, .{
         .line_length = 16,
         .context = 10,
         .offset = 0x800_0000,
@@ -31,27 +33,27 @@ pub fn main() anyerror!void {
 
     var prog_counter: usize = 0;
     while (true) : (prog_counter += 1) {
+        if (cpu.reg[15] >= 0x08000196) {
+            log.trace = true;
+        }
+
         const instr = cpu.getNextInstruction() catch break;
         const instr_type = cpu.decode(instr);
         cpu.dumpRegisters();
+        log.flush();
         const should_run = cpu.shouldExecuteInstruction(instr);
-        {
-            if (!should_run) std.debug.print(TF.Dim, .{});
-            std.debug.print(
-                "{X:0>8}  {X:0>8}\n          ",
-                .{ cpu.reg[15], instr },
-            );
-            // if (instr_type.isThumb())
-            //     std.debug.print("\r    {b:0>16}\n          ", .{instr})
-            // else
-            //     std.debug.print("\r    {b:0>32}\n          ", .{instr});
 
-            if (should_run) std.debug.print(TF.BrightCyan, .{});
-            std.debug.print("{}" ++ TF.Reset ++ "\n", .{instr_type});
-        }
+        log.print("{X:0>8}  {X:0>8}", .{ cpu.reg[15], instr }, .{});
+        log.indent();
+        defer log.deindent();
 
-        if (cpu.reg[15] >= 0x08000188)
-            waitForUserInput();
+        // if (instr_type.isThumb())
+        //     log.print("{b:0>16}", .{instr}, .{})
+        // else
+        //     log.print("{b:0>32}", .{instr}, .{});
+        // log.indent();
+        // defer log.deindent();
+        log.print("{}", .{instr_type}, .{});
 
         if (!should_run) {
             cpu.reg[15] += 4;
@@ -73,19 +75,21 @@ pub fn main() anyerror!void {
             .ThumbAluImmediate => cpu.thumbAluImmediate(@truncate(u16, instr)),
             .ThumbAluReg => cpu.thumbAluReg(@truncate(u16, instr)),
             .ThumbAddSub => cpu.thumbAddSub(@truncate(u16, instr)),
+            .ThumbLoadStoreMultiple => cpu.thumbLoadStoreMultiple(@truncate(u16, instr)),
             else => {
-                // waitForUserInput();
                 if (instr_type.isThumb())
                     cpu.reg[15] += 2
                 else
                     cpu.reg[15] += 4;
-                // cpu.incrementProgramCounter();
             },
         }
+
+        if (log.trace)
+            log.waitForUserInput();
+
         _ = prog_counter;
     }
 
-    std.debug.print("\n-- WARNING: Execution finished (crash?) -------------------------------\n", .{});
-    hexdump(cpu.game_pak, cpu.reg[15], .{ .offset = 0x800_0000, .line_length = 16 });
-    std.debug.print("-----------------------------------------------------------------------\n", .{});
+    log.print("\nExecution finished @0x{X:0>8} (crash?)", .{cpu.reg[15]}, .{ .text_format = Log.TextFormat.RedBg });
+    log.hexdump(cpu.game_pak, cpu.reg[15], .{ .offset = 0x800_0000, .line_length = 16 });
 }

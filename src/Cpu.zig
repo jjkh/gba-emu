@@ -1,8 +1,9 @@
-const std = @import("std");
 const Cpu = @This();
 
-const TF = @import("utility.zig").TextFormat;
-const hexdump = @import("utility.zig").hexdump;
+const std = @import("std");
+
+const Log = @import("Log.zig");
+const TF = Log.TextFormat;
 
 // register indices
 const SP = 13;
@@ -102,6 +103,8 @@ const Condition = enum(u4) {
     Always,
     _,
 };
+
+log: *Log,
 
 // 3.7 Registers
 // ARM7TDMI has a total of 37 registers - 31 general-purpose 32-bit registers and six
@@ -221,13 +224,13 @@ fn getMutableBufForAddress(self: *Cpu, addr: u32) ?[]u8 {
     };
 }
 
-pub fn read(self: Cpu, addr: u32) !u32 {
+pub fn read(self: *Cpu, addr: u32) !u32 {
     return switch (addr >> 24) {
         0x00, 0x02, 0x03, 0x08 => try readU32(self.getBufForAddress(addr).?, addr & 0x00FF_FFFF),
         // 0x0A => readU32(self.game_pak, addr - 0x0A00_0000),
         // 0x0C => readU32(self.game_pak, addr - 0x0C00_0000),
         else => {
-            std.debug.print("            " ++ TF.RedBg ++ "unimplemented address: {X:0>8}" ++ TF.Reset ++ "\n", .{addr});
+            self.log.print("unimplemented address: {X:0>8}", .{addr}, .{ .text_format = TF.RedBg });
             return error.UnimplementedAddress;
         },
     };
@@ -238,7 +241,7 @@ fn writeMmio(self: *Cpu, addr: u32, value: u32) void {
     _ = self;
 
     switch (addr) {
-        else => std.debug.print("            " ++ TF.RedBg ++ "IO 0x{X:0>8} not handled!" ++ TF.Reset ++ "\n", .{addr}),
+        else => self.log.print("IO 0x{X:0>8} not handled!", .{addr}, .{ .text_format = TF.RedBg }),
     }
 }
 
@@ -254,17 +257,17 @@ pub fn write(self: *Cpu, addr: u32, value: u32) void {
     std.mem.copy(u8, buf, &std.mem.toBytes(value));
 }
 
-pub fn getNextInstruction(self: Cpu) !u32 {
+pub fn getNextInstruction(self: *Cpu) !u32 {
     return try self.read(self.reg[PC]);
 }
 
-pub fn shouldExecuteInstruction(self: Cpu, instr: u32) bool {
+pub fn shouldExecuteInstruction(self: *Cpu, instr: u32) bool {
     // THUMB instructions do not have the condition field at the start of each opcode
     if (self.cpsr.t)
         return true;
 
     const condition = @intToEnum(Condition, instr >> 28);
-    std.debug.print(TF.Italic ++ TF.Underline ++ "{}" ++ TF.Reset ++ "\n", .{condition});
+    self.log.print("{}", .{condition}, .{ .text_format = TF.Italic ++ TF.Underline, .ignore_indent = true });
     return self.checkCondition(condition);
 }
 
@@ -445,25 +448,25 @@ pub fn branch(self: *Cpu, instr: u32) void {
     if ((instr & (1 << 24)) != 0) {
         // branch with link - save return address in LR
         self.reg[LR] = self.reg[PC] + 4;
-        std.debug.print("            branch with link\n", .{});
+        self.log.print("branch with link", .{}, .{});
     }
 
     const curr_pos = @intCast(i64, self.reg[PC]);
     const offset = @bitCast(i32, (instr & 0xFF_FFFF) << 2);
     self.reg[PC] = @intCast(u32, curr_pos + offset + 8);
 
-    std.debug.print("            jumping by 0x{X}\n", .{offset});
+    self.log.print("jumping by 0x{X}", .{offset}, .{});
 }
 
 pub fn branchExchange(self: *Cpu, instr: u32) void {
     const base_reg = instr & 0x0F;
     const toThumb = self.reg[base_reg] & 0x01 == 0x01;
 
-    std.debug.print("            T={} -> T={} (reg{})\n", .{
+    self.log.print("T={} -> T={} (reg{})", .{
         self.cpsr.t,
         toThumb,
         base_reg,
-    });
+    }, .{});
 
     self.cpsr.t = toThumb;
     self.reg[PC] += 4;
@@ -481,7 +484,7 @@ pub fn blockDataTransfer(self: *Cpu, instr: u32) void {
         _: u7,
     };
 
-    std.debug.print("            {}\n", .{@bitCast(BdtInstr, instr)});
+    self.log.print("{}", .{@bitCast(BdtInstr, instr)}, .{});
 
     self.reg[PC] += 4;
 }
@@ -520,26 +523,30 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
     if (sdt.base_reg == PC)
         mem_addr += 4;
 
-    std.debug.print("            {} at mem_addr=0x{X} (base_val=0x{X}, offset=0x{X})\n", .{
+    self.log.print("{} at mem_addr=0x{X} (base_val=0x{X}, offset=0x{X})", .{
         sdt.type,
         mem_addr,
         base_value,
         offset,
-    });
+    }, .{});
+
+    self.log.indent();
+    defer self.log.deindent();
 
     if (sdt.type == .Load) {
         if (sdt.quantity == .Byte) {
-            std.debug.print("            reg{} <- 0x{X:0>2} (byte@0x{X:0>8})\n", .{
-                sdt.src_dst_reg,
-                (try self.read(mem_addr)) & 0xFF,
-                mem_addr,
-            });
+            self.log.print(
+                "reg{} <- 0x{X:0>2} (byte@0x{X:0>8})",
+                .{ sdt.src_dst_reg, (try self.read(mem_addr)) & 0xFF, mem_addr },
+                .{},
+            );
 
             self.reg[sdt.src_dst_reg] = (try self.read(mem_addr)) & 0xFF;
         } else {
-            std.debug.print(
-                "            reg{} <- 0x{X:0>8} (word@0x{X:0>8})\n",
+            self.log.print(
+                "reg{} <- 0x{X:0>8} (word@0x{X:0>8})",
                 .{ sdt.src_dst_reg, try self.read(mem_addr), mem_addr },
+                .{},
             );
 
             // TODO: non-word-aligned loads
@@ -551,15 +558,17 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
             const byte: u32 = self.reg[sdt.src_dst_reg] & 0xFF;
             const word = byte | byte << 8 | byte << 16 | byte << 24;
 
-            std.debug.print(
-                "            0x{X:0>8} <- {X:0>8} (byte@reg{})\n",
+            self.log.print(
+                "0x{X:0>8} <- {X:0>8} (byte@reg{})",
                 .{ mem_addr, word, sdt.src_dst_reg },
+                .{},
             );
             self.write(mem_addr, word);
         } else {
-            std.debug.print(
-                "            0x{X:0>8} <- {X:0>8} (word@reg{})\n",
+            self.log.print(
+                "0x{X:0>8} <- {X:0>8} (word@reg{})",
                 .{ mem_addr, self.reg[sdt.src_dst_reg], sdt.src_dst_reg },
+                .{},
             );
             self.write(mem_addr, self.reg[sdt.src_dst_reg]);
         }
@@ -697,6 +706,8 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
     };
 
     const opcode = @intToEnum(Opcode, (instr & 0x01E0_0000) >> 21);
+    self.log.print("{}:", .{opcode}, .{});
+    self.log.indent();
 
     var op1: u32 = self.reg[reg1];
     if (reg1 == PC) op1 += 8;
@@ -707,23 +718,11 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
         const rotate = instr >> 8 & 0x0F;
 
         op2 = std.math.rotr(u32, imm_val, rotate * 2);
-        std.debug.print(
-            \\            {}:
-            \\                op1=0x{X} (reg1={})
-            \\                op2=0x{X} (imm_val=0x{X}, rot=0x{X})
-            \\                dest_reg={}
-            \\                set_cond_codes={}
-            \\
-        , .{
-            opcode,
-            op1,
-            reg1,
-            op2,
-            imm_val,
-            rotate,
-            dest_reg,
-            set_cond_codes,
-        });
+
+        self.log.print("op1=0x{X} (reg1={})", .{ op1, reg1 }, .{});
+        self.log.print("op2=0x{X} (imm_val=0x{X}, rot=0x{X})", .{ op2, imm_val, rotate }, .{});
+        self.log.print("dest_reg={}", .{dest_reg}, .{});
+        self.log.print("set_cond_codes={}", .{set_cond_codes}, .{});
     } else {
         // 4.5.2 Shifts
         const reg2 = instr & 0x0F;
@@ -733,25 +732,12 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
         if (reg2 == PC) reg_val += 8;
         op2 = self.shiftWithField(reg_val, shift_field, true);
 
-        std.debug.print(
-            \\            {}:
-            \\                op1=0x{X} (reg1={})
-            \\                op2=0x{X} (reg2={}, (val=0x{X}, shift_field=0x{X}))
-            \\                dest_reg={}
-            \\                set_cond_codes={}
-            \\
-        , .{
-            opcode,
-            op1,
-            reg1,
-            op2,
-            reg2,
-            self.reg[reg2],
-            shift_field,
-            dest_reg,
-            set_cond_codes,
-        });
+        self.log.print("op1=0x{X} (reg1={})", .{ op1, reg1 }, .{});
+        self.log.print("op2=0x{X} (reg2={}, (val=0x{X}, shift_field=0x{X}))", .{ op2, reg2, self.reg[reg2], shift_field }, .{});
+        self.log.print("dest_reg={}", .{dest_reg}, .{});
+        self.log.print("set_cond_codes={}", .{set_cond_codes}, .{});
     }
+    self.log.deindent();
 
     const result: u32 = switch (opcode) {
         .And, .Tst => op1 & op2,
@@ -786,7 +772,7 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
     }
 
     if (opcode.shouldWriteResult()) {
-        std.debug.print("            reg{} <- 0x{X}\n", .{ dest_reg, result });
+        self.log.print("reg{} <- 0x{X}", .{ dest_reg, result }, .{});
         self.reg[dest_reg] = result;
     }
 
@@ -796,7 +782,7 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
 pub fn thumbBranchUnconditional(self: *Cpu, instr: u16) void {
     const offset = @truncate(i12, @intCast(i32, instr << 1));
 
-    std.debug.print("            jumping by 0x{X}\n", .{offset});
+    self.log.print("jumping by 0x{X}", .{offset}, .{});
 
     const new_pos = @intCast(i32, self.reg[PC]) + offset;
     self.reg[PC] = @intCast(u32, new_pos);
@@ -805,13 +791,17 @@ pub fn thumbBranchUnconditional(self: *Cpu, instr: u16) void {
 pub fn thumbBranchConditional(self: *Cpu, instr: u16) void {
     const condition = @intToEnum(Condition, @truncate(u4, instr >> 8));
 
+    self.log.print("checking {}", .{condition}, .{});
+    self.log.indent();
+    defer self.log.deindent();
+
     if (!self.checkCondition(condition)) {
-        std.debug.print("            not jumping!\n", .{});
+        self.log.print("not jumping!", .{}, .{});
         self.reg[PC] += 2;
         return;
     }
     const offset = @truncate(i9, @intCast(i32, instr << 1));
-    std.debug.print("            jumping by 0x{X}\n", .{offset});
+    self.log.print("jumping by 0x{X}", .{offset}, .{});
 
     const new_pos = @intCast(i32, self.reg[PC]) + offset + 4;
     self.reg[PC] = @intCast(u32, new_pos);
@@ -827,12 +817,17 @@ pub fn thumbBranchLongWithLink(self: *Cpu, instr: u32) void {
 
     const lbi1 = @bitCast(LongBranchInstr, @truncate(u16, instr));
     const lbi2 = @bitCast(LongBranchInstr, @truncate(u16, instr >> 16));
-    std.debug.print("            {}\n", .{lbi1});
-    std.debug.print("            {}\n", .{lbi2});
+    self.log.print("lower: {}", .{lbi1}, .{});
+    self.log.print("upper: {}", .{lbi2}, .{});
+    self.log.indent();
+    defer self.log.deindent();
+
+    const lr = @intCast(i32, self.reg[PC]) + @bitCast(i23, @as(u23, lbi1.offset) << 12) + 4 + 1;
+    self.reg[LR] = @intCast(u32, lr);
 
     const unsigned_offset = @as(u32, lbi1.offset) << 12 | @as(u32, lbi2.offset) << 1;
     const offset = @bitCast(i23, @truncate(u23, unsigned_offset));
-    std.debug.print("            jumping by 0x{X}\n", .{offset});
+    self.log.print("jumping by 0x{X}", .{offset}, .{});
 
     const new_pos = @intCast(i32, self.reg[PC]) + offset + 4;
     self.reg[PC] = @intCast(u32, new_pos);
@@ -843,7 +838,7 @@ pub fn thumbPcRelativeLoad(self: *Cpu, instr: u16) void {
     const dest_reg = instr >> 8 & 0b111;
 
     const val = self.read((self.reg[PC] & 0xFFFF_FFFE) + offset + 4) catch unreachable;
-    std.debug.print("            reg{} <- 0x{X} (offset = 0x{X})\n", .{ dest_reg, val, offset });
+    self.log.print("reg{} <- 0x{X} (offset = 0x{X})", .{ dest_reg, val, offset }, .{});
     self.reg[dest_reg] = val;
 
     self.reg[PC] += 2;
@@ -865,7 +860,7 @@ pub fn thumbMoveShifted(self: *Cpu, instr: u16) void {
     };
 
     const msi = @bitCast(MoveShiftedInstr, instr);
-    std.debug.print("            {}\n", .{msi});
+    self.log.print("{}", .{msi}, .{});
 
     const shift_type: ShiftType = switch (msi.op) {
         .LSL => .LogicalLeft,
@@ -874,7 +869,7 @@ pub fn thumbMoveShifted(self: *Cpu, instr: u16) void {
     };
     const result = self.shift(self.reg[msi.source], msi.offset, shift_type);
 
-    std.debug.print("            reg{} <- 0x{X}\n", .{ msi.dest, result });
+    self.log.print("reg{} <- 0x{X}", .{ msi.dest, result }, .{});
     self.reg[msi.dest] = result;
 
     self.cpsr.z = result == 0;
@@ -902,12 +897,14 @@ pub fn thumbHiRegOperationsBranchExchange(self: *Cpu, instr: u16) void {
 
     const hroi = @bitCast(HiRegOpInstr, instr);
 
-    std.debug.print("            {}\n", .{hroi});
+    self.log.print("{}", .{hroi}, .{});
+    self.log.indent();
+    defer self.log.deindent();
 
     const dest_reg = if (hroi.flag2) hroi.dest_reg else @as(u4, hroi.dest_reg) + 8;
     const source_reg: u4 = if (hroi.flag1) hroi.source_reg else @as(u4, hroi.source_reg) + 8;
 
-    std.debug.print("            rd={}, rs={}\n", .{ dest_reg, source_reg });
+    self.log.print("rd={}, rs={}", .{ dest_reg, source_reg }, .{});
 
     switch (hroi.opcode) {
         .Add => self.reg[dest_reg] += self.reg[source_reg],
@@ -920,7 +917,7 @@ pub fn thumbHiRegOperationsBranchExchange(self: *Cpu, instr: u16) void {
         .Move => self.reg[dest_reg] = self.reg[source_reg],
         .BranchExchange => {
             self.reg[PC] = self.reg[source_reg] & 0xFFFF_FFFE;
-            self.cpsr.t = self.reg[source_reg] >> 31 == 1;
+            self.cpsr.t = self.reg[source_reg] & 0x01 == 0x01;
             return;
         },
     }
@@ -944,7 +941,9 @@ pub fn thumbAluImmediate(self: *Cpu, instr: u16) void {
     };
 
     const aii = @bitCast(AluImmInstr, instr);
-    std.debug.print("            {}\n", .{aii});
+    self.log.print("{}", .{aii}, .{});
+    self.log.indent();
+    defer self.log.deindent();
 
     const result = switch (aii.opcode) {
         .Move => aii.imm,
@@ -956,7 +955,7 @@ pub fn thumbAluImmediate(self: *Cpu, instr: u16) void {
     self.cpsr.n = result >> 31 == 1;
 
     if (aii.opcode != .Compare) {
-        std.debug.print("            reg{} <- 0x{X:0>2}\n", .{ aii.dest_reg, result });
+        self.log.print("reg{} <- 0x{X:0>2}", .{ aii.dest_reg, result }, .{});
         self.reg[aii.dest_reg] = result;
     }
 
@@ -998,11 +997,14 @@ pub fn thumbAluReg(self: *Cpu, instr: u16) void {
     };
 
     const ari = @bitCast(AluRegInstr, instr);
-    std.debug.print("            {}\n", .{ari});
+    self.log.print("{}", .{ari}, .{});
 
     const op1 = self.reg[ari.dest_reg];
     const op2 = self.reg[ari.source_reg];
-    std.debug.print("            op1=0x{X} op2=0x{X}\n", .{ op1, op2 });
+    self.log.print("op1=0x{X} op2=0x{X}", .{ op1, op2 }, .{});
+
+    self.log.indent();
+    defer self.log.deindent();
 
     const result = switch (ari.opcode) {
         .And, .Tst => op1 & op2,
@@ -1026,7 +1028,7 @@ pub fn thumbAluReg(self: *Cpu, instr: u16) void {
     self.cpsr.n = result >> 31 == 1;
 
     if (ari.opcode.setDest()) {
-        std.debug.print("            reg{} <- 0x{X:0>8}\n", .{ ari.dest_reg, result });
+        self.log.print("reg{} <- 0x{X:0>8}", .{ ari.dest_reg, result }, .{});
         self.reg[ari.dest_reg] = result;
     }
 
@@ -1044,10 +1046,11 @@ pub fn thumbAddSub(self: *Cpu, instr: u16) void {
     };
 
     const asi = @bitCast(AddSubInstr, instr);
-    std.debug.print("            {}\n", .{asi});
+    self.log.print("{}", .{asi}, .{});
+    self.log.indent();
+    defer self.log.deindent();
 
     const op2_val = if (asi.imm) asi.op2_reg else self.reg[asi.op2_reg];
-
     const result = switch (asi.opcode) {
         .Add => self.reg[asi.op1_reg] + op2_val,
         .Sub => self.reg[asi.op1_reg] - op2_val,
@@ -1056,15 +1059,62 @@ pub fn thumbAddSub(self: *Cpu, instr: u16) void {
     self.cpsr.z = result == 0;
     self.cpsr.n = result >> 31 == 1;
 
-    std.debug.print("            reg{} <- 0x{X:0>8}\n", .{ asi.dest_reg, result });
+    self.log.print("reg{} <- 0x{X:0>8}", .{ asi.dest_reg, result }, .{});
     self.reg[asi.dest_reg] = result;
 
     self.reg[PC] += 2;
 }
 
+pub fn thumbLoadStoreMultiple(self: *Cpu, instr: u16) void {
+    const LoadStoreMultipleInstr = packed struct {
+        reg_list: u8,
+        base_reg: u3,
+        dir: enum(u1) { Store, Load },
+        _: u4,
+    };
+
+    const lsmi = @bitCast(LoadStoreMultipleInstr, instr);
+    self.log.print("{}", .{lsmi}, .{});
+    self.log.indent();
+    defer self.log.deindent();
+
+    var reg: u4 = 0;
+    var addr: u32 = self.reg[lsmi.base_reg];
+    while (reg < 8) : (reg += 1) {
+        if ((lsmi.reg_list >> @intCast(u3, reg)) & 0x01 == 0x01) {
+            if (lsmi.dir == .Store) {
+                self.log.print("0x{X:0>8} <- 0x{X:0>8} (reg{})", .{ addr, self.reg[reg], reg }, .{});
+                self.write(addr, self.reg[reg]);
+            } else {
+                self.log.print("reg{} <- 0x{X:0>8} (word@0x{X:0>8})", .{ reg, self.reg[reg], addr }, .{});
+                self.reg[reg] = self.read(addr) catch unreachable;
+            }
+
+            addr += 4;
+        }
+    }
+
+    if (self.getBufForAddress(self.reg[lsmi.base_reg])) |buf| {
+        const hex_addr = self.reg[lsmi.base_reg] & 0x00FF_FFFF;
+
+        self.log.print("", .{}, .{});
+        self.log.hexdump(buf, hex_addr, .{
+            .line_length = 8,
+            .context = 0,
+            .offset = self.reg[lsmi.base_reg] & 0xFF00_0000,
+        });
+    }
+
+    self.reg[lsmi.base_reg] = addr;
+
+    self.reg[PC] += 2;
+}
+
 pub fn dumpRegisters(self: *Cpu) void {
-    std.debug.print("\n+--- Register Dump ----------------------------------------------------------------+\n", .{});
-    std.debug.print("|  CPSR: N={} Z={} C={} V={}  |  I={} F={}  |  T={}  |  Mode={b:0>5}                        |\n", .{
+    self.log.startBox(74, "Register Dump");
+    defer self.log.stopBox();
+
+    self.log.print("CPSR: N={} Z={} C={} V={}  |  I={} F={}  |  T={}  |  Mode={b:0>5}", .{
         @boolToInt(self.cpsr.n),
         @boolToInt(self.cpsr.z),
         @boolToInt(self.cpsr.c),
@@ -1073,22 +1123,15 @@ pub fn dumpRegisters(self: *Cpu) void {
         @boolToInt(self.cpsr.f),
         @boolToInt(self.cpsr.t),
         self.cpsr.mode,
-    });
+    }, .{});
 
-    std.debug.print("|  ", .{});
     for (self.reg[0..16]) |reg, i| {
-        if (reg != self.prev_reg[i])
-            std.debug.print(TF.YellowBg, .{});
-
-        std.debug.print("{X:0>8}" ++ TF.Reset ++ "  ", .{reg});
+        const cell_tf: ?[]const u8 = if (reg != self.prev_reg[i]) TF.YellowBg else null;
+        self.log.print("{X:0>8}", .{reg}, .{ .text_format = cell_tf, .newline = false });
+        self.log.print(" ", .{}, .{ .newline = i == 7 });
 
         self.prev_reg[i] = reg;
-
-        if (i == 7)
-            std.debug.print("|\n|  ", .{});
     }
-    std.debug.print("|\n", .{});
-    std.debug.print("+----------------------------------------------------------------------------------+\n\n", .{});
 }
 
 pub fn incrementProgramCounter(self: *Cpu) void {
