@@ -95,7 +95,7 @@ pub fn startBox(self: *Log, width: u16, title: ?[]const u8) void {
     _ = buf_writer.write("+--") catch unreachable;
     if (title) |t| {
         buf_writer.writeByte(' ') catch unreachable;
-        self.print("{s}", .{t}, .{ .text_format = TextFormat.Italic, .newline = false });
+        self.print("{s}", .{t}, .{ .text_format = TextFormat.Italic, .newline = false, .ignore_indent = true });
         buf_writer.writeByte(' ') catch unreachable;
     }
     buf_writer.writeByteNTimes('-', width - title_len) catch unreachable;
@@ -115,6 +115,8 @@ pub fn stopBox(self: *Log) void {
     if (self.continuing_line) {
         self.boxEndLine();
         buf_writer.writeByte('\n') catch unreachable;
+
+        self.continuing_line = false;
     }
 
     buf_writer.writeByte('+') catch unreachable;

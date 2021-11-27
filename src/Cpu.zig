@@ -33,7 +33,7 @@ const InstructionType = enum {
     ThumbPcRelativeLoad,
     ThumbLoadStoreWithRegOffset,
     ThumbLoadStoreSignExt,
-    ThumbStackLoadStopImmediateOffset,
+    ThumbLoadStoreImmediateOffset,
     ThumbLoadStoreHalfword,
     ThumbStackPtrRelativeLoadStore,
     ThumbLoadAddr,
@@ -192,6 +192,9 @@ spsr: [5]ProgramStatusRegister = undefined,
 rom: [0x4000]u8 = std.mem.zeroes([0x4000]u8),
 external_work_ram: [0x40000]u8 = std.mem.zeroes([0x40000]u8),
 internal_work_ram: [0x8000]u8 = std.mem.zeroes([0x8000]u8),
+
+vram: [0x18000]u8 = std.mem.zeroes([0x18000]u8),
+
 game_pak: []const u8 = undefined,
 
 fn readU32(mem: []const u8, offset: u32) !u32 {
@@ -211,6 +214,7 @@ fn getBufForAddress(self: Cpu, addr: u32) ?[]const u8 {
         0x00 => &self.rom,
         0x02 => &self.external_work_ram,
         0x03 => &self.internal_work_ram,
+        0x06 => &self.vram,
         0x08 => self.game_pak,
         else => null,
     };
@@ -220,15 +224,14 @@ fn getMutableBufForAddress(self: *Cpu, addr: u32) ?[]u8 {
     return switch (addr >> 24) {
         0x02 => &self.external_work_ram,
         0x03 => &self.internal_work_ram,
+        0x06 => &self.vram,
         else => null,
     };
 }
 
 pub fn read(self: *Cpu, addr: u32) !u32 {
     return switch (addr >> 24) {
-        0x00, 0x02, 0x03, 0x08 => try readU32(self.getBufForAddress(addr).?, addr & 0x00FF_FFFF),
-        // 0x0A => readU32(self.game_pak, addr - 0x0A00_0000),
-        // 0x0C => readU32(self.game_pak, addr - 0x0C00_0000),
+        0x00, 0x02, 0x03, 0x06, 0x08 => try readU32(self.getBufForAddress(addr).?, addr & 0x00FF_FFFF),
         else => {
             self.log.print("unimplemented address: {X:0>8}", .{addr}, .{ .text_format = TF.RedBg });
             return error.UnimplementedAddress;
@@ -236,20 +239,26 @@ pub fn read(self: *Cpu, addr: u32) !u32 {
     };
 }
 
-fn writeMmio(self: *Cpu, addr: u32, value: u32) void {
-    _ = value;
-    _ = self;
-
+fn writeMmio(self: *Cpu, addr: u32, value: u16) void {
     switch (addr) {
+        0x0400_0000 => self.lcdControl(value),
         else => self.log.print("IO 0x{X:0>8} not handled!", .{addr}, .{ .text_format = TF.RedBg }),
+    }
+}
+
+pub fn writeHalfword(self: *Cpu, addr: u32, value: u16) void {
+    switch (addr >> 24) {
+        0x04 => self.writeMmio(addr, @truncate(u16, value)),
+        else => self.write(addr, value),
     }
 }
 
 pub fn write(self: *Cpu, addr: u32, value: u32) void {
     const buf = switch (addr >> 24) {
-        0x02, 0x03 => self.getMutableBufForAddress(addr).?[addr & 0x00FF_FFFF ..],
+        0x02, 0x03, 0x06 => self.getMutableBufForAddress(addr).?[addr & 0x00FF_FFFF ..],
         0x04 => {
-            self.writeMmio(addr, value);
+            self.writeHalfword(addr, @truncate(u16, value));
+            self.writeHalfword(addr + 2, @truncate(u16, value >> 16));
             return;
         },
         else => unreachable,
@@ -334,7 +343,7 @@ fn decodeThumb(instr: u16) InstructionType {
 
     // 5.9 Load/store with immediate offset
     if (instr >> 13 == 0b011)
-        return .ThumbStackLoadStopImmediateOffset;
+        return .ThumbLoadStoreImmediateOffset;
 
     // 5.10 Load/store halfword
     if (instr >> 12 == 0b1000)
@@ -496,7 +505,7 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
         base_reg: u4,
         type: enum(u1) { Store, Load },
         write_back: bool,
-        quantity: enum(u1) { Word, Byte },
+        qty: enum(u1) { Word, Byte },
         dir: enum(u1) { Down, Up },
         index: enum(u1) { Post, Pre },
         offset_type: enum(u1) { Immediate, Register },
@@ -534,7 +543,7 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
     defer self.log.deindent();
 
     if (sdt.type == .Load) {
-        if (sdt.quantity == .Byte) {
+        if (sdt.qty == .Byte) {
             self.log.print(
                 "reg{} <- 0x{X:0>2} (byte@0x{X:0>8})",
                 .{ sdt.src_dst_reg, (try self.read(mem_addr)) & 0xFF, mem_addr },
@@ -553,7 +562,7 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
             self.reg[sdt.src_dst_reg] = try self.read(mem_addr);
         }
     } else {
-        if (sdt.quantity == .Byte) {
+        if (sdt.qty == .Byte) {
             // is this really correct?
             const byte: u32 = self.reg[sdt.src_dst_reg] & 0xFF;
             const word = byte | byte << 8 | byte << 16 | byte << 24;
@@ -581,7 +590,7 @@ pub fn singleDataTransfer(self: *Cpu, instr: u32) !void {
     //         .line_length = 16,
     //         .context = 2,
     //         .offset = mem_addr & 0xFF00_0000,
-    //         .highlight = if (sdt.quantity == .Word) .{ .start = addr, .end = addr + 4 } else null,
+    //         .highlight = if (sdt.qty == .Word) .{ .start = addr, .end = addr + 4 } else null,
     //     });
     // }
 
@@ -780,7 +789,7 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
 }
 
 pub fn thumbBranchUnconditional(self: *Cpu, instr: u16) void {
-    const offset = @truncate(i12, @intCast(i32, instr << 1));
+    const offset = @truncate(i12, @intCast(i32, instr << 1)) + 4;
 
     self.log.print("jumping by 0x{X}", .{offset}, .{});
 
@@ -822,14 +831,13 @@ pub fn thumbBranchLongWithLink(self: *Cpu, instr: u32) void {
     self.log.indent();
     defer self.log.deindent();
 
-    const lr = @intCast(i32, self.reg[PC]) + @bitCast(i23, @as(u23, lbi1.offset) << 12) + 4 + 1;
-    self.reg[LR] = @intCast(u32, lr);
-
     const unsigned_offset = @as(u32, lbi1.offset) << 12 | @as(u32, lbi2.offset) << 1;
     const offset = @bitCast(i23, @truncate(u23, unsigned_offset));
-    self.log.print("jumping by 0x{X}", .{offset}, .{});
+
+    self.reg[LR] = (self.reg[PC] + 4) | 0x01;
 
     const new_pos = @intCast(i32, self.reg[PC]) + offset + 4;
+    self.log.print("jumping to 0x{X:0>8}", .{new_pos}, .{});
     self.reg[PC] = @intCast(u32, new_pos);
 }
 
@@ -837,9 +845,12 @@ pub fn thumbPcRelativeLoad(self: *Cpu, instr: u16) void {
     const offset = (instr & 0xFF) << 2;
     const dest_reg = instr >> 8 & 0b111;
 
-    const val = self.read((self.reg[PC] & 0xFFFF_FFFE) + offset + 4) catch unreachable;
-    self.log.print("reg{} <- 0x{X} (offset = 0x{X})", .{ dest_reg, val, offset }, .{});
+    const addr = (self.reg[PC] & 0xFFFF_FFFC) + offset + 4;
+    const val = self.read(addr) catch unreachable;
+    self.log.print("reg{} <- 0x{X} (word@0x{X:0>8}, offset = 0x{X})", .{ dest_reg, val, addr, offset }, .{});
     self.reg[dest_reg] = val;
+
+    // self.log.hexdump(self.getBufForAddress(addr).?, addr & 0x00FF_FFFF, .{});
 
     self.reg[PC] += 2;
 }
@@ -901,8 +912,8 @@ pub fn thumbHiRegOperationsBranchExchange(self: *Cpu, instr: u16) void {
     self.log.indent();
     defer self.log.deindent();
 
-    const dest_reg = if (hroi.flag2) hroi.dest_reg else @as(u4, hroi.dest_reg) + 8;
-    const source_reg: u4 = if (hroi.flag1) hroi.source_reg else @as(u4, hroi.source_reg) + 8;
+    const dest_reg = if (hroi.flag1) @as(u4, hroi.dest_reg) + 8 else hroi.dest_reg;
+    const source_reg = if (hroi.flag2) @as(u4, hroi.source_reg) + 8 else hroi.source_reg;
 
     self.log.print("rd={}, rs={}", .{ dest_reg, source_reg }, .{});
 
@@ -948,7 +959,7 @@ pub fn thumbAluImmediate(self: *Cpu, instr: u16) void {
     const result = switch (aii.opcode) {
         .Move => aii.imm,
         .Compare, .Sub => self.reg[aii.dest_reg] - aii.imm,
-        .Add => self.reg[aii.dest_reg] - aii.imm,
+        .Add => self.reg[aii.dest_reg] + aii.imm,
     };
 
     self.cpsr.z = result == 0;
@@ -1094,20 +1105,166 @@ pub fn thumbLoadStoreMultiple(self: *Cpu, instr: u16) void {
         }
     }
 
-    if (self.getBufForAddress(self.reg[lsmi.base_reg])) |buf| {
-        const hex_addr = self.reg[lsmi.base_reg] & 0x00FF_FFFF;
+    // if (self.getBufForAddress(self.reg[lsmi.base_reg])) |buf| {
+    //     const hex_addr = self.reg[lsmi.base_reg] & 0x00FF_FFFF;
 
-        self.log.print("", .{}, .{});
-        self.log.hexdump(buf, hex_addr, .{
-            .line_length = 8,
-            .context = 0,
-            .offset = self.reg[lsmi.base_reg] & 0xFF00_0000,
-        });
-    }
+    //     self.log.print("", .{}, .{});
+    //     self.log.hexdump(buf, hex_addr, .{
+    //         .line_length = 8,
+    //         .context = 0,
+    //         .offset = self.reg[lsmi.base_reg] & 0xFF00_0000,
+    //     });
+    // }
 
     self.reg[lsmi.base_reg] = addr;
 
     self.reg[PC] += 2;
+}
+
+pub fn thumbLoadStoreImmediateOffset(self: *Cpu, instr: u16) void {
+    const LoadStoreImmOffsetInstr = packed struct {
+        source_dest_reg: u3,
+        base_reg: u3,
+        offset: u5,
+        dir: enum(u1) { Store, Load },
+        qty: enum(u1) { Word, Byte },
+        _: u3,
+    };
+
+    const lsioi = @bitCast(LoadStoreImmOffsetInstr, instr);
+    self.log.print("{}", .{lsioi}, .{});
+    self.log.indent();
+    defer self.log.deindent();
+
+    const offset = if (lsioi.qty == .Word)
+        @bitCast(i7, @as(u7, lsioi.offset) << 2)
+    else
+        @as(i7, @bitCast(i5, lsioi.offset));
+
+    const addr = @intCast(u32, @intCast(i32, self.reg[lsioi.base_reg]) + offset);
+
+    if (lsioi.dir == .Store) {
+        var reg_val = self.reg[lsioi.source_dest_reg];
+        if (lsioi.qty == .Byte) {
+            reg_val &= 0xFF;
+            self.log.print("0x{X:0>8} <- 0x{X:0>2} (byte@reg{})", .{ addr, reg_val, lsioi.source_dest_reg }, .{});
+        } else {
+            self.log.print("0x{X:0>8} <- 0x{X:0>8} (word@reg{})", .{ addr, reg_val, lsioi.source_dest_reg }, .{});
+        }
+        self.write(addr, reg_val);
+    } else {
+        var addr_val = self.read(addr) catch unreachable;
+        if (lsioi.qty == .Byte) {
+            addr_val &= 0xFF;
+            self.log.print("reg{} <- 0x{X:0>2} (byte@0x{X:0>8})", .{ lsioi.source_dest_reg, addr_val, addr }, .{});
+        } else {
+            self.log.print("reg{} <- 0x{X:0>8} (word@0x{X:0>8})", .{ lsioi.source_dest_reg, addr_val, addr }, .{});
+        }
+
+        self.reg[lsioi.source_dest_reg] = addr_val;
+    }
+
+    self.reg[PC] += 2;
+}
+
+pub fn thumbLoadStoreHalfword(self: *Cpu, instr: u16) void {
+    const LoadStoreHalfwordInstr = packed struct {
+        source_dest_reg: u3,
+        base_reg: u3,
+        offset: u5,
+        dir: enum(u1) { Store, Load },
+        _: u4,
+    };
+
+    const lshi = @bitCast(LoadStoreHalfwordInstr, instr);
+    self.log.print("{}", .{lshi}, .{});
+    self.log.indent();
+    defer self.log.deindent();
+
+    self.log.flush();
+
+    const offset = @bitCast(i6, @as(u6, lshi.offset) << 1);
+    const addr = @intCast(u32, @intCast(i32, self.reg[lshi.base_reg]) + offset);
+
+    if (lshi.dir == .Store) {
+        var reg_val = @truncate(u16, self.reg[lshi.source_dest_reg]);
+        self.log.print("0x{X:0>8} <- 0x{X:0>4} (halfword@reg{})", .{ addr, reg_val, lshi.source_dest_reg }, .{});
+        self.writeHalfword(addr, reg_val);
+    } else {
+        var addr_val = @truncate(u16, self.read(addr) catch unreachable);
+        self.log.print("reg{} <- 0x{X:0>4} (halfword@0x{X:0>8})", .{ lshi.source_dest_reg, addr_val, addr }, .{});
+        self.reg[lshi.source_dest_reg] = addr_val;
+    }
+
+    self.reg[PC] += 2;
+}
+
+fn pushToStack(self: *Cpu, val: u32) void {
+    self.reg[SP] -= 4;
+    self.log.print("stack push: 0x{X:0>8} <- 0x{X:0>8}", .{ self.reg[SP], val }, .{});
+    self.write(self.reg[SP], val);
+}
+
+fn popFromStack(self: *Cpu) u32 {
+    const val = self.read(self.reg[SP]) catch unreachable;
+    self.log.print("stack pop: 0x{X:0>8} (word@0x{X:0>8})", .{ val, self.reg[SP] }, .{});
+    self.reg[SP] += 4;
+
+    return val;
+}
+
+pub fn thumbPushPopReg(self: *Cpu, instr: u16) void {
+    const reg_list = instr & 0xFF;
+    const store_load_lr = (instr >> 8) & 0x01 == 0x01;
+    const dir = @intToEnum(enum(u1) { Store, Load }, (instr >> 11) & 0x01);
+
+    if (store_load_lr) {
+        self.log.print("  lr: ", .{}, .{ .newline = false });
+        if (dir == .Store)
+            self.pushToStack(self.reg[LR])
+        else
+            self.reg[LR] = self.popFromStack();
+    }
+
+    var i: u4 = 0;
+    while (i < 8) : (i += 1) {
+        const reg = if (dir == .Store) 8 - i else i;
+        if ((reg_list >> reg) & 0x01 == 0x01) {
+            self.log.print("reg{}: ", .{reg}, .{ .newline = false });
+            if (dir == .Store)
+                self.pushToStack(self.reg[reg])
+            else
+                self.reg[reg] = self.popFromStack();
+        }
+    }
+
+    self.reg[PC] += 2;
+}
+
+fn lcdControl(self: *Cpu, val: u16) void {
+    const LcdControl = packed struct {
+        bg_mode: u3,
+        cgb_mode: u1,
+        display_frame: u1,
+        h_blank_interval_free: bool,
+        obj_char_vram_mapping: enum(u1) { TwoDim, OneDim },
+        forced_blank: bool,
+        screen_display_bg0: bool,
+        screen_display_bg1: bool,
+        screen_display_bg2: bool,
+        screen_display_bg3: bool,
+        screen_display_obj: bool,
+        window_0_display: bool,
+        window_1_display: bool,
+        obj_window_display: bool,
+    };
+
+    const lc = @bitCast(LcdControl, val);
+    self.log.print("{}", .{lc}, .{});
+    self.log.indent();
+    defer self.log.deindent();
+
+    self.log.print("setting mode to mode {}", .{lc.bg_mode}, .{});
 }
 
 pub fn dumpRegisters(self: *Cpu) void {

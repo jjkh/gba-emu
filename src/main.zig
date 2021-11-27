@@ -24,35 +24,35 @@ pub fn main() anyerror!void {
     var cpu = Cpu{ .log = &log, .game_pak = input_file };
     // jump to game pak rom
     cpu.reg[15] = 0x800_0000;
-    log.hexdump(cpu.game_pak, 0x106, .{
-        .line_length = 16,
-        .context = 10,
-        .offset = 0x800_0000,
-        .highlight = .{ .start = 0x164, .end = 0x166 },
-    });
+    // log.hexdump(cpu.game_pak, 0x106, .{
+    //     .line_length = 16,
+    //     .context = 10,
+    //     .offset = 0x800_0000,
+    //     .highlight = .{ .start = 0x164, .end = 0x166 },
+    // });
 
     var prog_counter: usize = 0;
     while (true) : (prog_counter += 1) {
-        if (cpu.reg[15] >= 0x08000196) {
+        if (cpu.reg[15] == 0x08000348) {
             log.trace = true;
         }
 
         const instr = cpu.getNextInstruction() catch break;
         const instr_type = cpu.decode(instr);
         cpu.dumpRegisters();
-        log.flush();
         const should_run = cpu.shouldExecuteInstruction(instr);
 
         log.print("{X:0>8}  {X:0>8}", .{ cpu.reg[15], instr }, .{});
         log.indent();
         defer log.deindent();
 
-        // if (instr_type.isThumb())
-        //     log.print("{b:0>16}", .{instr}, .{})
+        // if (instr_type.isThumb() and instr_type != .ThumbBranchLongWithLink)
+        //     log.print("{b:0>16}", .{@truncate(u16, instr)}, .{})
         // else
         //     log.print("{b:0>32}", .{instr}, .{});
         // log.indent();
         // defer log.deindent();
+
         log.print("{}", .{instr_type}, .{});
 
         if (!should_run) {
@@ -76,7 +76,12 @@ pub fn main() anyerror!void {
             .ThumbAluReg => cpu.thumbAluReg(@truncate(u16, instr)),
             .ThumbAddSub => cpu.thumbAddSub(@truncate(u16, instr)),
             .ThumbLoadStoreMultiple => cpu.thumbLoadStoreMultiple(@truncate(u16, instr)),
+            .ThumbLoadStoreImmediateOffset => cpu.thumbLoadStoreImmediateOffset(@truncate(u16, instr)),
+            .ThumbLoadStoreHalfword => cpu.thumbLoadStoreHalfword(@truncate(u16, instr)),
+            .ThumbPushPopReg => cpu.thumbPushPopReg(@truncate(u16, instr)),
             else => {
+                log.trace = true;
+                log.waitForUserInput();
                 if (instr_type.isThumb())
                     cpu.reg[15] += 2
                 else
@@ -89,7 +94,10 @@ pub fn main() anyerror!void {
 
         _ = prog_counter;
     }
-
+    log.trace = true;
     log.print("\nExecution finished @0x{X:0>8} (crash?)", .{cpu.reg[15]}, .{ .text_format = Log.TextFormat.RedBg });
+    log.indent();
+    defer log.deindent();
+    cpu.dumpRegisters();
     log.hexdump(cpu.game_pak, cpu.reg[15], .{ .offset = 0x800_0000, .line_length = 16 });
 }
