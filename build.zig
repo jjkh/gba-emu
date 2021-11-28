@@ -1,4 +1,5 @@
 const std = @import("std");
+const SdlSdk = @import("libs/SDL.zig/Sdk.zig");
 
 pub fn build(b: *std.build.Builder) void {
     // Standard target options allows the person running `zig build` to choose
@@ -13,6 +14,12 @@ pub fn build(b: *std.build.Builder) void {
 
     const exe = b.addExecutable("gba-emu", "src/main.zig");
     exe.setTarget(target);
+
+    // add SDL library
+    const sdl_sdk = SdlSdk.init(b);
+    sdl_sdk.link(exe, .dynamic);
+    exe.addPackage(sdl_sdk.getWrapperPackage("sdl2"));
+
     exe.setBuildMode(mode);
     exe.install();
 

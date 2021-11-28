@@ -240,7 +240,4 @@ pub fn hexdump(self: *Log, buf: []const u8, target: usize, opt: HexdumpOptions) 
 pub fn waitForUserInput(self: *Log) void {
     self.print("<< Press ENTER to continue >>", .{}, .{ .text_format = TextFormat.Yellow, .ignore_indent = true });
     self.flush();
-
-    var buf: [16]u8 = undefined;
-    _ = std.io.getStdIn().reader().read(&buf) catch {};
 }
