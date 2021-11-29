@@ -7,7 +7,7 @@ const Log = @import("Log.zig");
 // const input_file = @embedFile("../gba_bios.bin");
 // const input_file = @embedFile("../tonc/first.gba");
 const input_file = @embedFile("../tonc/m3_demo.gba");
-// const input_file = @embedFile("../template.gba");
+// const input_file = @embedFile("../thumb.gba");
 
 pub fn main() !void {
     var log = Log.init();
@@ -169,7 +169,12 @@ pub fn main() !void {
                         b: u5,
                         _: u1,
                     };
-                    const px = @bitCast(Pixel, cpu.vram[y * 480 + x * 2] | @as(u16, cpu.vram[y * 480 + x * 2 + 1]) << 8);
+
+                    const px = switch (cpu.bg_mode) {
+                        3 => @bitCast(Pixel, cpu.vram[y * 480 + x * 2] | @as(u16, cpu.vram[y * 480 + x * 2 + 1]) << 8),
+                        4 => @bitCast(Pixel, cpu.palette_ram[cpu.vram[(y * 240 + x) * 2]] | @as(u16, cpu.palette_ram[cpu.vram[(y * 240 + x) * 2 + 1]]) << 8),
+                        else => unreachable,
+                    };
 
                     try renderer.setColorRGB(@as(u8, px.r) << 3, @as(u8, px.g) << 3, @as(u8, px.b) << 3);
                     try renderer.fillRect(SDL.Rectangle{

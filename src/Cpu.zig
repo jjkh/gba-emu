@@ -193,9 +193,12 @@ rom: [0x4000]u8 = std.mem.zeroes([0x4000]u8),
 external_work_ram: [0x40000]u8 = std.mem.zeroes([0x40000]u8),
 internal_work_ram: [0x8000]u8 = std.mem.zeroes([0x8000]u8),
 
+palette_ram: [0x4000]u8 = std.mem.zeroes([0x4000]u8),
 vram: [0x18000]u8 = std.mem.zeroes([0x18000]u8),
 
 game_pak: []const u8 = undefined,
+
+bg_mode: u3 = 3,
 
 fn readU32(mem: []const u8, offset: u32) !u32 {
     if (mem.len < offset + 2)
@@ -214,6 +217,7 @@ fn getBufForAddress(self: Cpu, addr: u32) ?[]const u8 {
         0x00 => &self.rom,
         0x02 => &self.external_work_ram,
         0x03 => &self.internal_work_ram,
+        0x05 => &self.palette_ram,
         0x06 => &self.vram,
         0x08 => self.game_pak,
         else => null,
@@ -224,6 +228,7 @@ fn getMutableBufForAddress(self: *Cpu, addr: u32) ?[]u8 {
     return switch (addr >> 24) {
         0x02 => &self.external_work_ram,
         0x03 => &self.internal_work_ram,
+        0x05 => &self.palette_ram,
         0x06 => &self.vram,
         else => null,
     };
@@ -231,7 +236,7 @@ fn getMutableBufForAddress(self: *Cpu, addr: u32) ?[]u8 {
 
 pub fn read(self: *Cpu, addr: u32) !u32 {
     return switch (addr >> 24) {
-        0x00, 0x02, 0x03, 0x06, 0x08 => try readU32(self.getBufForAddress(addr).?, addr & 0x00FF_FFFF),
+        0x00, 0x02, 0x03, 0x05, 0x06, 0x08 => try readU32(self.getBufForAddress(addr).?, addr & 0x00FF_FFFF),
         else => {
             self.log.print("unimplemented address: {X:0>8}", .{addr}, .{ .text_format = TF.RedBg });
             return error.UnimplementedAddress;
@@ -247,23 +252,21 @@ fn writeMmio(self: *Cpu, addr: u32, value: u16) void {
 }
 
 pub fn writeHalfword(self: *Cpu, addr: u32, value: u16) void {
-    switch (addr >> 24) {
-        0x04 => self.writeMmio(addr, @truncate(u16, value)),
-        else => self.write(addr, value),
-    }
-}
-
-pub fn write(self: *Cpu, addr: u32, value: u32) void {
     const buf = switch (addr >> 24) {
-        0x02, 0x03, 0x06 => self.getMutableBufForAddress(addr).?[addr & 0x00FF_FFFF ..],
+        0x02, 0x03, 0x05, 0x06 => self.getMutableBufForAddress(addr).?[addr & 0x00FF_FFFF ..],
         0x04 => {
-            self.writeHalfword(addr, @truncate(u16, value));
-            self.writeHalfword(addr + 2, @truncate(u16, value >> 16));
+            self.writeMmio(addr, @truncate(u16, value));
             return;
         },
         else => unreachable,
     };
+
     std.mem.copy(u8, buf, &std.mem.toBytes(value));
+}
+
+pub fn write(self: *Cpu, addr: u32, value: u32) void {
+    self.writeHalfword(addr, @truncate(u16, value));
+    self.writeHalfword(addr + 2, @truncate(u16, value >> 16));
 }
 
 pub fn getNextInstruction(self: *Cpu) !u32 {
@@ -616,13 +619,15 @@ fn shift(self: *Cpu, value: u32, shift_amount: u5, shift_type: ShiftType) u32 {
         },
         .LogicalRight => {
             // TODO: only when ALU is in "logical class" (4-12)
-            self.cpsr.c = (value >> shift_amount - 1) == 1;
+            if (shift_amount > 0)
+                self.cpsr.c = (value >> shift_amount - 1) == 1;
 
             return value >> shift_amount;
         },
         .ArithmeticRight => {
             // TODO: only when ALU is in "logical class" (4-12)
-            self.cpsr.c = (value >> shift_amount - 1) == 1;
+            if (shift_amount > 0)
+                self.cpsr.c = (value >> shift_amount - 1) == 1;
 
             // first bitCast to i32 to get sign extension of shift
             return @bitCast(u32, @bitCast(i32, value) >> shift_amount);
@@ -751,12 +756,12 @@ pub fn dataProcessing(self: *Cpu, instr: u32) void {
     const result: u32 = switch (opcode) {
         .And, .Tst => op1 & op2,
         .Eor, .TstEq => op1 ^ op2,
-        .Sub, .Cmp => op1 - op2,
-        .RSub => op2 - op1,
-        .Add, .CmpM => op1 + op2,
-        .AddC => op1 + op2 + @boolToInt(self.cpsr.c),
-        .SubC => op1 - op2 + @boolToInt(self.cpsr.c) - 1,
-        .RSubC => op2 - op1 + @boolToInt(self.cpsr.c) - 1,
+        .Sub, .Cmp => op1 -% op2,
+        .RSub => op2 -% op1,
+        .Add, .CmpM => op1 +% op2,
+        .AddC => op1 +% op2 +% @boolToInt(self.cpsr.c),
+        .SubC => op1 -% op2 +% @boolToInt(self.cpsr.c) - 1,
+        .RSubC => op2 -% op1 +% @boolToInt(self.cpsr.c) - 1,
         .Or => op1 | op2,
         .Mov => op2,
         .BitClear => op1 & ~op2,
@@ -1352,6 +1357,7 @@ fn lcdControl(self: *Cpu, val: u16) void {
     defer self.log.deindent();
 
     self.log.print("setting mode to mode {}", .{lc.bg_mode}, .{});
+    self.bg_mode = lc.bg_mode;
 }
 
 pub fn dumpRegisters(self: *Cpu) void {
