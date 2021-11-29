@@ -5,8 +5,8 @@ const Cpu = @import("Cpu.zig");
 const Log = @import("Log.zig");
 
 // const input_file = @embedFile("../gba_bios.bin");
-const input_file = @embedFile("../tonc/first.gba");
-// const input_file = @embedFile("../tonc/m3_demo.gba");
+// const input_file = @embedFile("../tonc/first.gba");
+const input_file = @embedFile("../tonc/m3_demo.gba");
 // const input_file = @embedFile("../template.gba");
 
 pub fn main() !void {
@@ -60,8 +60,10 @@ pub fn main() !void {
     var prog_timer = std.time.Timer.start() catch unreachable;
     var prog_counter: usize = 0;
     while (true) : (prog_counter += 1) {
-        if (cpu.reg[15] == 0x08000510)
-            wait_for_input = true;
+        // if (cpu.reg[15] == 0x08000422) {
+        //     log.trace = true;
+        //     wait_for_input = true;
+        // }
 
         const instr = cpu.getNextInstruction() catch break;
         const instr_type = cpu.decode(instr);
@@ -105,6 +107,9 @@ pub fn main() !void {
             .ThumbLoadStoreImmediateOffset => cpu.thumbLoadStoreImmediateOffset(@truncate(u16, instr)),
             .ThumbLoadStoreHalfword => cpu.thumbLoadStoreHalfword(@truncate(u16, instr)),
             .ThumbPushPopReg => cpu.thumbPushPopReg(@truncate(u16, instr)),
+            .ThumbAddOffsetToStackPtr => cpu.thumbAddOffsetToStackPtr(@truncate(u16, instr)),
+            .ThumbStackPtrRelativeLoadStore => cpu.thumbStackPtrRelativeLoadStore(@truncate(u16, instr)),
+            .ThumbLoadStoreSignExt => cpu.thumbLoadStoreSignExt(@truncate(u16, instr)),
             else => {
                 wait_for_input = true;
 
@@ -115,37 +120,43 @@ pub fn main() !void {
             },
         }
 
-        // if (log.trace)
-        //     log.waitForUserInput();
+        if (log.trace)
+            wait_for_input = true;
 
-        _ = prog_counter;
-
-        if (wait_for_input) {
-            log.trace = true;
-            log.waitForUserInput();
-        }
-
-        while (true) {
-            while (SDL.pollEvent()) |ev| {
-                switch (ev) {
-                    .quit => return,
-                    .key_down => |key| {
-                        switch (key.scancode) {
-                            .escape => return,
-                            else => wait_for_input = false,
-                        }
-                    },
-                    else => {},
-                }
+        {
+            const old_title: ?[*c]const u8 = if (wait_for_input) SDL.c.SDL_GetWindowTitle(window.ptr) else null;
+            if (wait_for_input) {
+                log.trace = true;
+                log.waitForUserInput();
+                SDL.c.SDL_SetWindowTitle(window.ptr, "GBA Emulator (paused)");
             }
-            if (!wait_for_input)
-                break;
+            defer if (old_title) |title|
+                SDL.c.SDL_SetWindowTitle(window.ptr, title);
 
-            std.time.sleep(1000);
+            while (true) {
+                while (SDL.pollEvent()) |ev| {
+                    switch (ev) {
+                        .quit => return,
+                        .key_down => |key| {
+                            switch (key.scancode) {
+                                .escape => return,
+                                else => wait_for_input = false,
+                            }
+                        },
+                        else => {},
+                    }
+                }
+                if (!wait_for_input) {
+                    break;
+                }
+
+                std.time.sleep(1000);
+            }
         }
 
         // NOTE: only works for bg mode 3
-        if (prog_counter % 280_896 == 0) {
+        // if (prog_counter % 280_896 == 0) {
+        if (prog_counter % 10_000 == 0) {
             try renderer.clear();
 
             var y: u32 = 0;
@@ -172,7 +183,9 @@ pub fn main() !void {
             renderer.present();
 
             const time_in_ms = @intToFloat(f32, prog_timer.lap()) / 100_0000;
-            std.debug.print("{d:.2}ms ({d:.1} fps)\n", .{ time_in_ms, 1000 / time_in_ms });
+            var buf: [256]u8 = undefined;
+            const title = try std.fmt.bufPrintZ(&buf, "GBA Emulator: {d:.2}ms ({d:.1} fps)", .{ time_in_ms, 1000 / time_in_ms });
+            SDL.c.SDL_SetWindowTitle(window.ptr, title);
         }
     }
     log.trace = true;

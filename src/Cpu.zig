@@ -958,8 +958,8 @@ pub fn thumbAluImmediate(self: *Cpu, instr: u16) void {
 
     const result = switch (aii.opcode) {
         .Move => aii.imm,
-        .Compare, .Sub => self.reg[aii.dest_reg] - aii.imm,
-        .Add => self.reg[aii.dest_reg] + aii.imm,
+        .Compare, .Sub => self.reg[aii.dest_reg] -% aii.imm,
+        .Add => self.reg[aii.dest_reg] +% aii.imm,
     };
 
     self.cpsr.z = result == 0;
@@ -1023,12 +1023,12 @@ pub fn thumbAluReg(self: *Cpu, instr: u16) void {
         .Lsl => self.shift(op1, @truncate(u5, op2), .LogicalLeft),
         .Lsr => self.shift(op1, @truncate(u5, op2), .LogicalRight),
         .Asr => self.shift(op1, @truncate(u5, op2), .ArithmeticRight),
-        .Adc => op1 + op2 + @boolToInt(self.cpsr.c),
-        .Sbc => op1 - op2 - @boolToInt(!self.cpsr.c),
+        .Adc => op1 +% op2 +% @boolToInt(self.cpsr.c),
+        .Sbc => op1 -% op2 -% @boolToInt(!self.cpsr.c),
         .Ror => self.shift(op1, @truncate(u5, op2), .RotateRight),
         .Neg => @bitCast(u32, -@bitCast(i32, op2)),
-        .Cmp => op1 - op2,
-        .Cmn => op1 + op2,
+        .Cmp => op1 -% op2,
+        .Cmn => op1 +% op2,
         .Orr => op1 | op2,
         .Mul => @truncate(u32, op1 * op2),
         .Bic => op1 & ~op2,
@@ -1063,8 +1063,8 @@ pub fn thumbAddSub(self: *Cpu, instr: u16) void {
 
     const op2_val = if (asi.imm) asi.op2_reg else self.reg[asi.op2_reg];
     const result = switch (asi.opcode) {
-        .Add => self.reg[asi.op1_reg] + op2_val,
-        .Sub => self.reg[asi.op1_reg] - op2_val,
+        .Add => self.reg[asi.op1_reg] +% op2_val,
+        .Sub => self.reg[asi.op1_reg] -% op2_val,
     };
 
     self.cpsr.z = result == 0;
@@ -1187,13 +1187,84 @@ pub fn thumbLoadStoreHalfword(self: *Cpu, instr: u16) void {
     const addr = @intCast(u32, @intCast(i32, self.reg[lshi.base_reg]) + offset);
 
     if (lshi.dir == .Store) {
-        var reg_val = @truncate(u16, self.reg[lshi.source_dest_reg]);
+        const reg_val = @truncate(u16, self.reg[lshi.source_dest_reg]);
         self.log.print("0x{X:0>8} <- 0x{X:0>4} (halfword@reg{})", .{ addr, reg_val, lshi.source_dest_reg }, .{});
         self.writeHalfword(addr, reg_val);
     } else {
-        var addr_val = @truncate(u16, self.read(addr) catch unreachable);
+        const addr_val = @truncate(u16, self.read(addr) catch unreachable);
         self.log.print("reg{} <- 0x{X:0>4} (halfword@0x{X:0>8})", .{ lshi.source_dest_reg, addr_val, addr }, .{});
         self.reg[lshi.source_dest_reg] = addr_val;
+    }
+
+    self.reg[PC] += 2;
+}
+
+// pub fn thumbPcRelativeLoad(self: *Cpu, instr: u16) void {
+//     const offset = (instr & 0xFF) << 2;
+//     const dest_reg = instr >> 8 & 0b111;
+
+//     const addr = (self.reg[PC] & 0xFFFF_FFFC) + offset + 4;
+//     const val = self.read(addr) catch unreachable;
+//     self.log.print("reg{} <- 0x{X} (word@0x{X:0>8}, offset = 0x{X})", .{ dest_reg, val, addr, offset }, .{});
+//     self.reg[dest_reg] = val;
+
+//     // self.log.hexdump(self.getBufForAddress(addr).?, addr & 0x00FF_FFFF, .{});
+
+//     self.reg[PC] += 2;
+// }
+
+pub fn thumbStackPtrRelativeLoadStore(self: *Cpu, instr: u16) void {
+    const offset = @truncate(u10, (instr & 0xFF) << 2);
+    const dest_reg = @truncate(u3, instr >> 8);
+    const dir = @intToEnum(enum(u1) { Store, Load }, @truncate(u1, instr >> 11));
+
+    if (dir == .Store) {
+        self.log.print("0x{X:0>8} (SP+0x{X}) <- 0x{X:0>8} (reg{})", .{ self.reg[SP] + offset, offset, self.reg[dest_reg], dest_reg }, .{});
+        self.write(self.reg[SP] + offset, self.reg[dest_reg]);
+    } else {
+        self.reg[dest_reg] = self.read(self.reg[SP] + offset) catch unreachable;
+        self.log.print("reg{} <- 0x{X:0>8} (SP+0x{X})", .{ dest_reg, self.reg[dest_reg], offset }, .{});
+    }
+
+    self.reg[PC] += 2;
+}
+
+pub fn thumbLoadStoreSignExt(self: *Cpu, instr: u16) void {
+    const LoadStoreSignExtInstr = packed struct {
+        dest_reg: u3,
+        base_reg: u3,
+        offset_reg: u3,
+        _: u1,
+        sign_ext: bool,
+        h: bool,
+        __: u4,
+    };
+
+    const lssei = @bitCast(LoadStoreSignExtInstr, instr);
+    self.log.print("{}", .{lssei}, .{});
+    self.log.indent();
+    defer self.log.deindent();
+
+    const base_addr = self.reg[lssei.base_reg] + self.reg[lssei.offset_reg];
+
+    if (!lssei.sign_ext and !lssei.h) {
+        // store halfword
+        self.log.print("0x{X:0>8} <- 0x{X:0>4} (halfword@reg{})", .{ base_addr, @truncate(u16, self.reg[lssei.dest_reg]), lssei.dest_reg }, .{});
+        self.writeHalfword(base_addr, @truncate(u16, self.reg[lssei.dest_reg]));
+    } else if (!lssei.sign_ext and lssei.h) {
+        // load halfword
+        self.reg[lssei.dest_reg] = (self.read(base_addr) catch unreachable) & 0xFFFF;
+        self.log.print("reg{} <- 0x{X:0>4} (halfword@0x{X})", .{ lssei.dest_reg, @truncate(u16, self.reg[lssei.dest_reg]), base_addr }, .{});
+    } else if (lssei.sign_ext and !lssei.h) {
+        // load sign-extended byte
+        const byte = @bitCast(i8, @truncate(u8, self.read(base_addr) catch unreachable));
+        self.reg[lssei.dest_reg] = @bitCast(u32, @intCast(i32, byte));
+        self.log.print("reg{} <- 0x{X:0>8} (byte 0x{X:0>2}@0x{X} sign-extended)", .{ lssei.dest_reg, byte, self.reg[lssei.dest_reg], base_addr }, .{});
+    } else if (lssei.sign_ext and lssei.h) {
+        // load sign-extended halfword
+        const halfword = @bitCast(i16, @truncate(u16, self.read(base_addr) catch unreachable));
+        self.reg[lssei.dest_reg] = @bitCast(u32, @intCast(i32, halfword));
+        self.log.print("reg{} <- 0x{X:0>8} (halfword 0x{X:0>4}@0x{X} sign-extended)", .{ lssei.dest_reg, halfword, self.reg[lssei.dest_reg], base_addr }, .{});
     }
 
     self.reg[PC] += 2;
@@ -1237,6 +1308,22 @@ pub fn thumbPushPopReg(self: *Cpu, instr: u16) void {
                 self.reg[reg] = self.popFromStack();
         }
     }
+
+    self.reg[PC] += 2;
+}
+
+pub fn thumbAddOffsetToStackPtr(self: *Cpu, instr: u16) void {
+    const imm = @truncate(u7, instr & 0x7F);
+    const negative = (instr >> 7) & 0x01 == 0x01;
+
+    const imm_val = if (negative)
+        @bitCast(i9, @as(u9, imm) << 2) * -1
+    else
+        @bitCast(i9, @as(u9, imm) << 2);
+
+    const new_pos = @intCast(i32, self.reg[SP]) + imm_val;
+    self.log.print("SP <- 0x{X:0>8} (offset by 0x{X})", .{ new_pos, imm_val }, .{});
+    self.reg[SP] = @intCast(u32, new_pos);
 
     self.reg[PC] += 2;
 }
